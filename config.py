@@ -1,0 +1,174 @@
+"""Настройки бота: хранятся в data/settings.json и меняются прямо из Telegram."""
+import json
+import os
+import threading
+from copy import deepcopy
+
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
+SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
+
+# key: (значение по умолчанию, тип, описание для Telegram)
+PARAMS = {
+    # --- монеты ---
+    "coin_mode":        ("manual", str,   "Режим монет: manual (свой список) или auto (топ по обороту)"),
+    "auto_top_n":       (15,       int,   "Сколько монет брать в режиме auto"),
+    "auto_min_turnover": (50_000_000, float, "Мин. оборот за 24ч в $ для режима auto"),
+    "ob_depth":         (200,      int,   "Глубина стакана: 50, 200 или 1000 уровней"),
+
+    # --- плотности ---
+    "min_wall_usd":     (300_000,  float, "Мин. размер плотности в $"),
+    "wall_mult":        (6.0,      float, "Во сколько раз плотность больше медианного уровня стакана"),
+    "wall_max_dist_pct": (1.5,     float, "Макс. расстояние плотности от цены, %"),
+    "min_wall_age_sec": (30,       int,   "Мин. время жизни плотности до сигнала, сек"),
+    "min_trust":        (55,       int,   "Мин. рейтинг доверия плотности (0-100)"),
+    "approach_pct":     (0.15,     float, "На каком расстоянии до плотности давать сигнал отскока, %"),
+
+    # --- объём ---
+    "vol_mult":         (4.0,      float, "Всплеск объёма: во сколько раз минутный объём выше среднего"),
+    "vol_min_move_pct": (0.4,      float, "Всплеск объёма: мин. движение цены за минуту, %"),
+    "vol_min_usd":      (500_000,  float, "Всплеск объёма: мин. объём за минуту в $"),
+
+    # --- ликвидации ---
+    "liq_usd":          (250_000,  float, "Ликвидации: мин. сумма за 60 сек в $"),
+    "liq_mode":         ("reversal", str, "Ликвидации: reversal (против каскада) или momentum (по каскаду)"),
+
+    # --- риск и бумажная торговля ---
+    "paper_enabled":    (True,     bool,  "Открывать бумажные сделки по сигналам"),
+    "start_balance":    (1000.0,   float, "Стартовый виртуальный баланс, $"),
+    "risk_pct":         (1.0,      float, "Риск на сделку, % от баланса"),
+    "max_leverage":     (10.0,     float, "Макс. плечо для расчёта размера позиции"),
+    "rr":               (2.0,      float, "Соотношение прибыль/риск для тейка"),
+    "sl_buffer_pct":    (0.1,      float, "Стоп за плотностью с запасом, %"),
+    "default_sl_pct":   (0.35,     float, "Стоп для сигналов без плотности, %"),
+    "max_hold_min":     (30,       int,   "Закрыть бумажную сделку через N минут"),
+    "max_open":         (3,        int,   "Макс. одновременных бумажных сделок"),
+    "daily_loss_pct":   (5.0,      float, "Стоп на день: при убытке больше N% новые сделки не открываются"),
+    "fee_pct":          (0.055,    float, "Комиссия за вход/выход (тейкер), %"),
+    "slippage_pct":     (0.02,     float, "Проскальзывание на вход/выход, %"),
+
+    # --- общее ---
+    "cooldown_sec":     (300,      int,   "Пауза между одинаковыми сигналами по монете, сек"),
+    "btc_filter":       (False,    bool,  "Не давать лонги по альтам, когда BTC падает (и наоборот)"),
+    "btc_filter_pct":   (0.3,      float, "BTC-фильтр: движение BTC за 5 мин, %"),
+}
+
+SIGNAL_TYPES = {
+    "bounce":   "Отскок от плотности",
+    "breakout": "Пробой (плотность съели)",
+    "volume":   "Всплеск объёма",
+    "liq":      "Каскад ликвидаций",
+}
+
+DEFAULT_STATE = {
+    "owner_id": None,
+    "paused": False,
+    "coins": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"],
+    "signals_on": {k: True for k in SIGNAL_TYPES},
+    "notify": {k: True for k in SIGNAL_TYPES},
+    "params": {k: v[0] for k, v in PARAMS.items()},
+    "overrides": {},  # {"BTCUSDT": {"min_wall_usd": 3000000}}
+}
+
+
+def _cast(key, raw):
+    typ = PARAMS[key][1]
+    if typ is bool:
+        if isinstance(raw, bool):
+            return raw
+        s = str(raw).strip().lower()
+        if s in ("1", "true", "on", "yes", "да", "вкл"):
+            return True
+        if s in ("0", "false", "off", "no", "нет", "выкл"):
+            return False
+        raise ValueError("нужно on/off")
+    if typ in (int, float):
+        s = str(raw).strip().lower().replace(" ", "").replace("_", "").replace(",", ".")
+        mult = 1
+        if s.endswith("k"):
+            mult, s = 1_000, s[:-1]
+        elif s.endswith("m"):
+            mult, s = 1_000_000, s[:-1]
+        try:
+            val = float(s) * mult
+        except ValueError:
+            raise ValueError("нужно число, например 500k, 2.5m или 0.3") from None
+        return int(val) if typ is int else val
+    return str(raw).strip()
+
+
+def _validate(key, val):
+    if key == "coin_mode" and val not in ("manual", "auto"):
+        raise ValueError("manual или auto")
+    if key == "liq_mode" and val not in ("reversal", "momentum"):
+        raise ValueError("reversal или momentum")
+    if key == "ob_depth" and val not in (50, 200, 1000):
+        raise ValueError("50, 200 или 1000")
+    if isinstance(val, (int, float)) and not isinstance(val, bool) and val < 0:
+        raise ValueError("не может быть отрицательным")
+
+
+class Settings:
+    def __init__(self, path=SETTINGS_PATH):
+        self.path = path
+        self._lock = threading.Lock()
+        self.state = deepcopy(DEFAULT_STATE)
+        self.load()
+
+    def load(self):
+        if os.path.exists(self.path):
+            with open(self.path, encoding="utf-8") as f:
+                saved = json.load(f)
+            for k, v in saved.items():
+                if isinstance(v, dict) and isinstance(self.state.get(k), dict):
+                    self.state[k].update(v)
+                else:
+                    self.state[k] = v
+        self.save()
+
+    def save(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        with self._lock:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.state, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
+
+    # параметры
+    def get(self, key, symbol=None):
+        if symbol and key in self.state["overrides"].get(symbol, {}):
+            return self.state["overrides"][symbol][key]
+        return self.state["params"].get(key, PARAMS[key][0])
+
+    def set(self, key, raw, symbol=None):
+        if key not in PARAMS:
+            raise KeyError(key)
+        val = _cast(key, raw)
+        _validate(key, val)
+        if symbol:
+            self.state["overrides"].setdefault(symbol, {})[key] = val
+        else:
+            self.state["params"][key] = val
+        self.save()
+        return val
+
+    def clear_override(self, symbol, key=None):
+        ov = self.state["overrides"].get(symbol, {})
+        if key:
+            ov.pop(key, None)
+        else:
+            ov.clear()
+        if not ov:
+            self.state["overrides"].pop(symbol, None)
+        self.save()
+
+    def reset_params(self):
+        self.state["params"] = {k: v[0] for k, v in PARAMS.items()}
+        self.state["overrides"] = {}
+        self.save()
+
+    def __getitem__(self, k):
+        return self.state[k]
+
+    def __setitem__(self, k, v):
+        self.state[k] = v
+        self.save()

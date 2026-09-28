@@ -1,0 +1,15 @@
+[Unit]
+Description=Bybit scalp signals Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=scalpbot
+WorkingDirectory=/opt/scalp_bot
+ExecStart=/opt/scalp_bot/venv/bin/python main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
