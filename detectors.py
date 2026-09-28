@@ -42,6 +42,7 @@ class WallTracker:
         self.symbol = symbol
         self.walls = {}                    # (side, price) -> Wall
         self.recent_pulled = deque(maxlen=20)  # (ts, side, price, usd, moves) для поиска «переездов»
+        self.med = {}  # сглаженная медиана уровня стакана по сторонам, чтобы порог не прыгал
 
     def scan(self, book, now, p):
         """p: функция get(key). Возвращает список событий о пропавших плотностях."""
@@ -53,17 +54,24 @@ class WallTracker:
         min_usd = p("min_wall_usd")
         mult = p("wall_mult")
 
+        top_n = max(1, int(p("max_walls_side")))
         found = {}
         for side, levels in (("bid", book.bids), ("ask", book.asks)):
             near = [(px, sz * px) for px, sz in levels.items() if abs(px - mid) / mid <= max_dist]
             if len(near) < 10:
                 continue
-            med = statistics.median(u for _, u in near)
+            m = statistics.median(u for _, u in near)
+            prev = self.med.get(side)
+            med = self.med[side] = m if prev is None else prev * 0.95 + m * 0.05
             thr = max(min_usd, med * mult)
-            for px, usd in near:
+            # плотностью считаем только самые крупные аномалии с каждой стороны
+            ranked = sorted(near, key=lambda x: -x[1])
+            for rank, (px, usd) in enumerate(ranked[:top_n * 2]):
                 key = (side, px)
-                # гистерезис: уже известную плотность держим, пока она > половины порога
-                if usd >= thr or (key in self.walls and usd >= thr * 0.5):
+                if rank < top_n and usd >= thr:
+                    found[key] = usd
+                elif key in self.walls and usd >= thr * 0.7:
+                    # гистерезис: известную плотность держим, пока она не сильно упала
                     found[key] = usd
 
         events = []
@@ -71,13 +79,18 @@ class WallTracker:
             if key in found:
                 continue
             side, px = key
-            crossed = (side == "bid" and best_bid < px) or (side == "ask" and best_ask > px)
             del self.walls[key]
+            crossed = (side == "bid" and best_bid < px) or (side == "ask" and best_ask > px)
             if crossed:
                 events.append(("eaten", w))
-            else:
+                continue
+            levels = book.bids if side == "bid" else book.asks
+            left_usd = levels.get(px, 0) * px
+            if left_usd < 0.3 * w.max_usd:
+                # заявку реально сняли: запоминаем, чтобы поймать «переезд»
                 self.recent_pulled.append((now, side, px, w.max_usd, w.moves))
                 events.append(("pulled", w))
+            # иначе она просто выпала из топа по размеру, это не спуфинг
 
         for key, usd in found.items():
             w = self.walls.get(key)
@@ -90,8 +103,8 @@ class WallTracker:
                 side, px = key
                 moves = 0
                 for ts, s2, px2, usd2, mv in self.recent_pulled:
-                    if (s2 == side and now - ts < 5 and abs(px2 - px) / px < 0.005
-                            and 0.6 < usd / usd2 < 1.6):
+                    if (s2 == side and now - ts < 3 and abs(px2 - px) / px < 0.002
+                            and 0.7 < usd / usd2 < 1.4):
                         moves = mv + 1
                         break
                 self.walls[key] = Wall(side, px, usd, now, moves)
