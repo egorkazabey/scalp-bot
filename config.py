@@ -17,18 +17,18 @@ PARAMS = {
     "auto_min_turnover": (20_000_000, float, "Мин. оборот за 24ч в $: монеты мельче не берём (auto, movers, mix)"),
     "max_coins":        (30,       int,   "Макс. монет одновременно"),
     "refresh_min":      (15,       int,   "Как часто обновлять список монет в авто-режимах, мин"),
-    "ob_depth":         (200,      int,   "Глубина стакана: 50, 200 или 1000 уровней"),
+    "ob_depth":         (1000,     int,   "Глубина стакана: 50, 200 или 1000 уровней"),
     "min_book_usd":     (150_000,  float, "Мин. сумма заявок в пределах 1% от цены (каждая сторона), $. "
                                           "Меньше: стакан тонкий, сигналы не даются"),
 
     # --- автоподстройка порогов под монету ---
-    "auto_scale":       (True,     bool,  "Подстраивать пороги плотности, объёма и ликвидаций под оборот монеты"),
-    "wall_turnover_pct": (0.1,     float, "Автопорог плотности: % от оборота монеты за 24ч"),
+    "auto_scale":       (True,     bool,  "Подстраивать пороги плотности, объёма и ликвидаций под каждую монету"),
+    "wall_share_pct":   (1.0,      float, "Автопорог плотности: мин. % от всех заявок этой стороны в зоне поиска"),
     "liq_turnover_pct": (0.02,     float, "Автопорог ликвидаций: % от оборота монеты за 24ч"),
 
     # --- плотности ---
-    "min_wall_usd":     (300_000,  float, "Мин. размер плотности в $ (если автоподстройка выключена)"),
-    "wall_mult":        (6.0,      float, "Во сколько раз плотность больше медианного уровня стакана"),
+    "min_wall_usd":     (300_000,  float, "Мин. размер плотности в $ (при автоподстройке мин. $20K)"),
+    "wall_mult":        (4.0,      float, "Во сколько раз плотность больше соседних уровней стакана (по 10 с каждой стороны)"),
     "wall_max_dist_pct": (1.5,     float, "Макс. расстояние плотности от цены, %"),
     "max_walls_side":   (3,        int,   "Сколько самых крупных плотностей отслеживать с каждой стороны"),
     "min_wall_age_sec": (30,       int,   "Мин. время жизни плотности до сигнала, сек"),
@@ -72,7 +72,15 @@ SIGNAL_TYPES = {
     "liq":      "Каскад ликвидаций",
 }
 
+# Когда меняется значение по умолчанию: если у пользователя стоит старое значение по умолчанию
+# (он его не трогал), переводим на новое. Своё значение пользователя не трогаем.
+SETTINGS_VERSION = 2
+MIGRATIONS = {
+    2: [("ob_depth", 200, 1000), ("wall_mult", 6.0, 4.0), ("auto_min_turnover", 50_000_000, 20_000_000)],
+}
+
 DEFAULT_STATE = {
+    "version": SETTINGS_VERSION,
     "owner_id": None,
     "paused": False,
     "coins": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"],
@@ -136,6 +144,15 @@ class Settings:
                     self.state[k].update(v)
                 else:
                     self.state[k] = v
+            ver = saved.get("version", 1)
+            for v in range(ver + 1, SETTINGS_VERSION + 1):
+                for key, old, new in MIGRATIONS.get(v, []):
+                    if self.state["params"].get(key) == old:
+                        self.state["params"][key] = new
+            self.state["version"] = SETTINGS_VERSION
+            # параметры, которых больше нет
+            for k in [k for k in self.state["params"] if k not in PARAMS]:
+                del self.state["params"][k]
         self.save()
 
     def save(self):

@@ -1,11 +1,10 @@
 """Детекторы: плотности (с рейтингом доверия), всплески объёма, ликвидации."""
-import statistics
 from collections import deque
 
 
 class Wall:
     __slots__ = ("side", "price", "usd", "max_usd", "min_usd", "first_seen", "last_seen",
-                 "traded_usd", "touched", "moves", "signaled")
+                 "traded_usd", "touched", "moves", "signaled", "ratio")
 
     def __init__(self, side, price, usd, now, moves=0):
         self.side = side          # "bid" (поддержка) или "ask" (сопротивление)
@@ -19,6 +18,7 @@ class Wall:
         self.touched = False      # цена доходила до неё
         self.moves = moves        # сколько раз она «переезжала» (признак спуфинга)
         self.signaled = False
+        self.ratio = 0.0          # во сколько раз больше соседних уровней
 
     def age(self, now):
         return now - self.first_seen
@@ -42,7 +42,7 @@ class WallTracker:
         self.symbol = symbol
         self.walls = {}                    # (side, price) -> Wall
         self.recent_pulled = deque(maxlen=20)  # (ts, side, price, usd, moves) для поиска «переездов»
-        self.med = {}  # сглаженная медиана уровня стакана по сторонам, чтобы порог не прыгал
+        self.thr = {}  # сглаженный порог плотности по сторонам, чтобы он не прыгал
 
     def scan(self, book, now, p):
         """p: функция get(key). Возвращает список событий о пропавших плотностях."""
@@ -55,24 +55,44 @@ class WallTracker:
         mult = p("wall_mult")
 
         top_n = max(1, int(p("max_walls_side")))
+        share = p("wall_share_pct") / 100 if p("auto_scale") else 0
+        win = 10  # сколько соседних уровней с каждой стороны сравниваем
         found = {}
         for side, levels in (("bid", book.bids), ("ask", book.asks)):
-            near = [(px, sz * px) for px, sz in levels.items() if abs(px - mid) / mid <= max_dist]
-            if len(near) < 10:
+            # уровни в порядке стакана: от цены наружу
+            items = sorted(levels.items(), reverse=(side == "bid"))
+            items = [(px, sz * px) for px, sz in items if abs(px - mid) / mid <= max_dist]
+            n = len(items)
+            if n < 10:
                 continue
-            m = statistics.median(u for _, u in near)
-            prev = self.med.get(side)
-            med = self.med[side] = m if prev is None else prev * 0.95 + m * 0.05
-            thr = max(min_usd, med * mult)
-            # плотностью считаем только самые крупные аномалии с каждой стороны
-            ranked = sorted(near, key=lambda x: -x[1])
-            for rank, (px, usd) in enumerate(ranked[:top_n * 2]):
-                key = (side, px)
-                if rank < top_n and usd >= thr:
-                    found[key] = usd
-                elif key in self.walls and usd >= thr * 0.7:
-                    # гистерезис: известную плотность держим, пока она не сильно упала
-                    found[key] = usd
+            u = [x[1] for x in items]
+            pre = [0.0]
+            for v in u:
+                pre.append(pre[-1] + v)
+            # абсолютный минимум: из настройки и доля от всех заявок стороны в зоне
+            raw = max(min_usd, pre[-1] * share)
+            prev = self.thr.get(side)
+            floor = self.thr[side] = raw if prev is None else prev * 0.9 + raw * 0.1
+            cands, keep = [], []
+            for i, (px, usd) in enumerate(items):
+                if usd < floor * 0.7:
+                    continue
+                lo, hi = max(0, i - win), min(n, i + win + 1)
+                cnt = hi - lo - 1
+                local = (pre[hi] - pre[lo] - usd) / cnt if cnt else 0
+                ratio = usd / local if local > 0 else 999
+                if usd >= floor and ratio >= mult:
+                    cands.append((usd, px, ratio))
+                elif (side, px) in self.walls and ratio >= mult * 0.7:
+                    # гистерезис: известную плотность держим, пока она не сильно просела
+                    keep.append((usd, px, ratio))
+            # новые плотности: только самые крупные аномалии стороны;
+            # уже известные держим, пока они в двойном топе
+            cands.sort(reverse=True)
+            chosen = cands[:top_n] + [c for c in cands[top_n:top_n * 2] if (side, c[1]) in self.walls]
+            chosen += sorted(keep, reverse=True)[:max(0, top_n * 2 - len(chosen))]
+            for usd, px, ratio in chosen:
+                found[(side, px)] = (usd, ratio)
 
         events = []
         for key, w in list(self.walls.items()):
@@ -92,9 +112,10 @@ class WallTracker:
                 events.append(("pulled", w))
             # иначе она просто выпала из топа по размеру, это не спуфинг
 
-        for key, usd in found.items():
+        for key, (usd, ratio) in found.items():
             w = self.walls.get(key)
             if w:
+                w.ratio = ratio
                 w.usd = usd
                 w.max_usd = max(w.max_usd, usd)
                 w.min_usd = min(w.min_usd, usd)
@@ -108,6 +129,7 @@ class WallTracker:
                         moves = mv + 1
                         break
                 self.walls[key] = Wall(side, px, usd, now, moves)
+                self.walls[key].ratio = ratio
         return events
 
     def on_trade(self, price, usd, touch_pct):

@@ -21,7 +21,7 @@ log = logging.getLogger("bot")
 GROUPS = {
     "coins": ("🪙 Монеты и стакан", ["coin_mode", "auto_top_n", "movers_n", "auto_min_turnover", "max_coins",
                                     "refresh_min", "ob_depth", "min_book_usd"]),
-    "scale": ("📐 Автоподстройка порогов", ["auto_scale", "wall_turnover_pct", "liq_turnover_pct"]),
+    "scale": ("📐 Автоподстройка порогов", ["auto_scale", "wall_share_pct", "liq_turnover_pct"]),
     "walls": ("🧱 Плотности", ["min_wall_usd", "wall_mult", "wall_max_dist_pct", "max_walls_side", "min_wall_age_sec",
                               "min_trust", "approach_pct"]),
     "flow": ("📊 Объём и ликвидации", ["vol_mult", "vol_min_move_pct", "vol_min_usd", "liq_usd", "liq_mode"]),

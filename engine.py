@@ -152,14 +152,14 @@ class Engine:
         """Значение параметра для монеты: своя настройка монеты > автоподстройка > общая."""
         if key in self.s["overrides"].get(sym, {}):
             return self.s["overrides"][sym][key]
-        if key in ("min_wall_usd", "vol_min_usd", "liq_usd") and self.s.get("auto_scale"):
+        if key == "min_wall_usd" and self.s.get("auto_scale"):
+            return 20_000  # остальное порог плотности берёт из самого стакана (доля и средний уровень)
+        if key in ("vol_min_usd", "liq_usd") and self.s.get("auto_scale"):
             try:
                 turnover = float(self.feed.tickers.get(sym, {}).get("turnover24h") or 0)
             except ValueError:
                 turnover = 0
             if turnover > 0:
-                if key == "min_wall_usd":
-                    return max(50_000, turnover * self.s.get("wall_turnover_pct") / 100)
                 if key == "liq_usd":
                     return max(20_000, turnover * self.s.get("liq_turnover_pct") / 100)
                 # минимальный минутный объём для всплеска: 3 средних минуты, но не выше общей настройки
@@ -448,36 +448,33 @@ class Engine:
     def walls_text(self, sym):
         tr = self.walls.get(sym)
         book = self.feed.books.get(sym)
-        if not tr or not book or not book.bids:
-            return f"По {sym} пока нет данных стакана."
+        if sym not in self.feed.books:
+            return (f"{sym} сейчас не отслеживается.\n"
+                    f"Добавь в свой список: <code>/add {sym.replace('USDT', '')}</code> "
+                    "(в режиме manual или mix)")
+        if not tr or not book or not book.bids or not book.asks:
+            return f"По {sym} стакан ещё загружается, попробуй через пару секунд."
         now = time.time()
         mid = book.mid()
         ws = sorted(tr.walls.values(), key=lambda w: -w.price)
-        thr = self.eff("min_wall_usd", sym)
         if sym in self.s["overrides"] and "min_wall_usd" in self.s["overrides"][sym]:
-            how = "своя настройка"
+            how = f"своя настройка монеты, мин. {fusd(self.eff('min_wall_usd', sym))}"
         elif self.s.get("auto_scale"):
-            how = "авто от оборота"
+            how = (f"авто: {self.s.get('wall_share_pct'):g}% заявок стороны или "
+                   f"{self.eff('wall_mult', sym):g}x средний уровень")
         else:
-            how = "общая настройка"
-        mult = self.eff("wall_mult", sym)
+            how = f"общая настройка, мин. {fusd(self.eff('min_wall_usd', sym))}"
         max_dist = self.eff("wall_max_dist_pct", sym) / 100
         lines = [f"<b>{sym}</b> · цена {fp(mid)}"]
-        # как получился порог: он равен большему из абсолютного и «N x медианный уровень»
-        rel = []
-        for side in ("bid", "ask"):
-            med = tr.med.get(side)
-            if med:
-                rel.append(f"{side} {fusd(med * mult)}")
-        lines.append(f"Порог: мин. {fusd(thr)} ({how})"
-                     + (f", и в {mult:g}x больше медианы: " + ", ".join(rel) if rel else ""))
+        thr = " · ".join(f"{side} {fusd(tr.thr[side])}" for side in ("bid", "ask") if side in tr.thr)
+        lines.append(f"Порог плотности: {thr or '-'}\n<i>({how})</i>")
         if ws:
             lines.append("")
             for w in ws:
                 dist = (w.price / mid - 1) * 100
                 icon = "🟥" if w.side == "ask" else "🟩"
                 lines.append(f"{icon} <code>{fp(w.price)}</code> ({dist:+.2f}%) {fusd(w.usd)} · "
-                             f"{fdur(w.age(now))} · доверие {w.trust(now)}")
+                             f"x{w.ratio:.0f} к соседям · {fdur(w.age(now))} · доверие {w.trust(now)}")
         else:
             lines.append("\nПлотностей по текущим порогам нет.")
         # самые крупные заявки в зоне поиска: видно, насколько они не дотягивают до порога
