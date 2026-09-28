@@ -442,13 +442,37 @@ class Engine:
             how = "авто от оборота"
         else:
             how = "общая настройка"
-        head = f"<b>{sym}</b> · цена {fp(mid)}\nПорог плотности: {fusd(thr)} ({how})"
-        if not ws:
-            return head + "\nПлотностей по текущим порогам нет."
-        lines = [head]
-        for w in ws:
-            dist = (w.price / mid - 1) * 100
-            icon = "🟥" if w.side == "ask" else "🟩"
-            lines.append(f"{icon} <code>{fp(w.price)}</code> ({dist:+.2f}%) {fusd(w.usd)} · "
-                         f"{fdur(w.age(now))} · доверие {w.trust(now)}")
+        mult = self.eff("wall_mult", sym)
+        max_dist = self.eff("wall_max_dist_pct", sym) / 100
+        lines = [f"<b>{sym}</b> · цена {fp(mid)}"]
+        # как получился порог: он равен большему из абсолютного и «N x медианный уровень»
+        rel = []
+        for side in ("bid", "ask"):
+            med = tr.med.get(side)
+            if med:
+                rel.append(f"{side} {fusd(med * mult)}")
+        lines.append(f"Порог: мин. {fusd(thr)} ({how})"
+                     + (f", и в {mult:g}x больше медианы: " + ", ".join(rel) if rel else ""))
+        if ws:
+            lines.append("")
+            for w in ws:
+                dist = (w.price / mid - 1) * 100
+                icon = "🟥" if w.side == "ask" else "🟩"
+                lines.append(f"{icon} <code>{fp(w.price)}</code> ({dist:+.2f}%) {fusd(w.usd)} · "
+                             f"{fdur(w.age(now))} · доверие {w.trust(now)}")
+        else:
+            lines.append("\nПлотностей по текущим порогам нет.")
+        # самые крупные заявки в зоне поиска: видно, насколько они не дотягивают до порога
+        lines.append(f"\n<b>Крупнейшие заявки в пределах {max_dist * 100:g}%:</b>")
+        for side, levels, icon in (("ask", book.asks, "🔸"), ("bid", book.bids, "🔹")):
+            near = sorted(((px, sz * px) for px, sz in levels.items() if abs(px - mid) / mid <= max_dist),
+                          key=lambda x: -x[1])[:3]
+            for px, usd in sorted(near, key=lambda x: -x[0]):
+                lines.append(f"{icon} <code>{fp(px)}</code> ({(px / mid - 1) * 100:+.2f}%) {fusd(usd)}")
+        lo = (min(book.bids) / mid - 1) * 100
+        hi = (max(book.asks) / mid - 1) * 100
+        lines.append(f"<i>Стакан виден от {lo:+.2f}% до {hi:+.2f}% ({len(book.bids) + len(book.asks)} уровней)</i>")
+        if min(-lo, hi) < max_dist * 100 * 0.8:
+            lines.append("<i>Стакан виден уже зоны поиска: дальние плотности не видны. "
+                         "Можно поднять глубину: /set ob_depth 1000</i>")
         return "\n".join(lines)
