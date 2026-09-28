@@ -85,13 +85,27 @@ class BybitFeed:
             data = await r.json()
         return data["result"]["list"]
 
-    async def top_symbols(self, n, min_turnover):
+    async def market(self, min_turnover=0):
+        """Все USDT-фьючерсы с оборотом и изменением за 24ч. Заодно обновляет self.tickers,
+        чтобы автопороги работали сразу, не дожидаясь WebSocket."""
         items = await self.fetch_tickers()
-        items = [
-            t for t in items
-            if t["symbol"].endswith("USDT") and float(t.get("turnover24h") or 0) >= min_turnover
-        ]
-        items.sort(key=lambda t: float(t["turnover24h"]), reverse=True)
+        out = []
+        for t in items:
+            sym = t["symbol"]
+            if not sym.endswith("USDT"):
+                continue
+            try:
+                turnover = float(t.get("turnover24h") or 0)
+                change = float(t.get("price24hPcnt") or 0) * 100
+            except ValueError:
+                continue
+            self.tickers.setdefault(sym, {}).update({k: v for k, v in t.items() if v not in ("", None)})
+            if turnover >= min_turnover:
+                out.append({"symbol": sym, "turnover": turnover, "change": change})
+        return out
+
+    async def top_symbols(self, n, min_turnover):
+        items = sorted(await self.market(min_turnover), key=lambda t: -t["turnover"])
         return [t["symbol"] for t in items[:n]]
 
     async def valid_symbols(self):

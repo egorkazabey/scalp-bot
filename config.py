@@ -10,13 +10,22 @@ SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 # key: (значение по умолчанию, тип, описание для Telegram)
 PARAMS = {
     # --- монеты ---
-    "coin_mode":        ("manual", str,   "Режим монет: manual (свой список) или auto (топ по обороту)"),
-    "auto_top_n":       (15,       int,   "Сколько монет брать в режиме auto"),
-    "auto_min_turnover": (50_000_000, float, "Мин. оборот за 24ч в $ для режима auto"),
+    "coin_mode":        ("manual", str,   "Режим монет: manual (свой список), auto (топ по обороту), "
+                                          "movers (топ роста и падения) или mix (всё вместе)"),
+    "auto_top_n":       (15,       int,   "Сколько монет брать из топа по обороту (auto и mix)"),
+    "movers_n":         (5,        int,   "Сколько монет брать из топа роста и столько же из топа падения"),
+    "auto_min_turnover": (20_000_000, float, "Мин. оборот за 24ч в $: монеты мельче не берём (auto, movers, mix)"),
+    "max_coins":        (30,       int,   "Макс. монет одновременно"),
+    "refresh_min":      (15,       int,   "Как часто обновлять список монет в авто-режимах, мин"),
     "ob_depth":         (200,      int,   "Глубина стакана: 50, 200 или 1000 уровней"),
 
+    # --- автоподстройка порогов под монету ---
+    "auto_scale":       (True,     bool,  "Подстраивать пороги плотности, объёма и ликвидаций под оборот монеты"),
+    "wall_turnover_pct": (0.1,     float, "Автопорог плотности: % от оборота монеты за 24ч"),
+    "liq_turnover_pct": (0.02,     float, "Автопорог ликвидаций: % от оборота монеты за 24ч"),
+
     # --- плотности ---
-    "min_wall_usd":     (300_000,  float, "Мин. размер плотности в $"),
+    "min_wall_usd":     (300_000,  float, "Мин. размер плотности в $ (если автоподстройка выключена)"),
     "wall_mult":        (6.0,      float, "Во сколько раз плотность больше медианного уровня стакана"),
     "wall_max_dist_pct": (1.5,     float, "Макс. расстояние плотности от цены, %"),
     "max_walls_side":   (3,        int,   "Сколько самых крупных плотностей отслеживать с каждой стороны"),
@@ -99,8 +108,8 @@ def _cast(key, raw):
 
 
 def _validate(key, val):
-    if key == "coin_mode" and val not in ("manual", "auto"):
-        raise ValueError("manual или auto")
+    if key == "coin_mode" and val not in ("manual", "auto", "movers", "mix"):
+        raise ValueError("manual, auto, movers или mix")
     if key == "liq_mode" and val not in ("reversal", "momentum"):
         raise ValueError("reversal или momentum")
     if key == "ob_depth" and val not in (50, 200, 1000):

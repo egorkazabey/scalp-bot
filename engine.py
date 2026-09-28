@@ -60,6 +60,8 @@ class Engine:
         self.symbols = []
         self.last_error = None
         self._restart_lock = asyncio.Lock()
+        self.coin_tags = {}  # монета -> почему она в списке (свой / объём / рост / падение)
+        self._picks = {}     # прошлый выбор по каждой категории, для устойчивости списка
         self._stale_alerted = False
 
     # ---------- жизненный цикл ----------
@@ -76,18 +78,85 @@ class Engine:
             t.cancel()
         await self.feed.close()
 
-    async def resolve_symbols(self):
-        if self.s.get("coin_mode") == "auto":
-            try:
-                return await self.feed.top_symbols(self.s.get("auto_top_n"), self.s.get("auto_min_turnover"))
-            except Exception as e:
-                self.last_error = f"авто-подбор монет: {e}"
-                log.warning("auto symbols failed: %s", e)
-        return list(self.s["coins"])
+    @staticmethod
+    def _pick(ranked, n, current):
+        """Топ-n из ranked, но монеты, которые уже отслеживаются, держим, пока они в топ-2n:
+        чтобы список не дёргался из-за монет на границе."""
+        keep = [s for s in ranked[:n * 2] if s in current][:n]
+        for s in ranked:
+            if len(keep) >= n:
+                break
+            if s not in keep:
+                keep.append(s)
+        return keep
 
-    async def restart_feed(self):
+    async def resolve_symbols(self):
+        mode = self.s.get("coin_mode")
+        if mode == "manual":
+            self.coin_tags = {s: "свой" for s in self.s["coins"]}
+            return list(self.s["coins"])
+        try:
+            market = await self.feed.market(self.s.get("auto_min_turnover"))
+        except Exception as e:
+            self.last_error = f"авто-подбор монет: {e}"
+            log.warning("auto symbols failed: %s", e)
+            return list(self.symbols or self.s["coins"])
+        self.last_error = None
+        info = {m["symbol"]: m for m in market}
+        by_vol = [m["symbol"] for m in sorted(market, key=lambda m: -m["turnover"])]
+        up = [m["symbol"] for m in sorted(market, key=lambda m: -m["change"]) if m["change"] > 0]
+        down = [m["symbol"] for m in sorted(market, key=lambda m: m["change"]) if m["change"] < 0]
+        tags = {}
+        picks = {}
+
+        def take(cat, ranked, n, label):
+            ranked = [x for x in ranked if x not in tags]  # не дублируем уже взятые монеты
+            picks[cat] = self._pick(ranked, n, set(self._picks.get(cat, [])))
+            for x in picks[cat]:
+                tags[x] = label(x)
+
+        if mode == "mix":
+            for x in self.s["coins"]:
+                tags.setdefault(x, "свой")
+        if mode in ("auto", "mix"):
+            take("vol", by_vol, self.s.get("auto_top_n"), lambda x: "объём")
+        if mode in ("movers", "mix"):
+            n = self.s.get("movers_n")
+            take("up", up, n, lambda x: f"📈 {info[x]['change']:+.1f}%")
+            take("down", down, n, lambda x: f"📉 {info[x]['change']:+.1f}%")
+        self._picks = picks
+        syms = list(tags)[:max(1, self.s.get("max_coins"))]
+        self.coin_tags = {s: tags[s] for s in syms}
+        return syms
+
+    def coin_change(self, sym):
+        """Изменение за 24ч, %, из тикера Bybit."""
+        try:
+            return float(self.feed.tickers.get(sym, {}).get("price24hPcnt")) * 100
+        except (TypeError, ValueError):
+            return None
+
+    def eff(self, key, sym):
+        """Значение параметра для монеты: своя настройка монеты > автоподстройка > общая."""
+        if key in self.s["overrides"].get(sym, {}):
+            return self.s["overrides"][sym][key]
+        if key in ("min_wall_usd", "vol_min_usd", "liq_usd") and self.s.get("auto_scale"):
+            try:
+                turnover = float(self.feed.tickers.get(sym, {}).get("turnover24h") or 0)
+            except ValueError:
+                turnover = 0
+            if turnover > 0:
+                if key == "min_wall_usd":
+                    return max(50_000, turnover * self.s.get("wall_turnover_pct") / 100)
+                if key == "liq_usd":
+                    return max(20_000, turnover * self.s.get("liq_turnover_pct") / 100)
+                # минимальный минутный объём для всплеска: 3 средних минуты, но не выше общей настройки
+                return min(self.s.get("vol_min_usd"), max(20_000, 3 * turnover / 1440))
+        return self.s.get(key)
+
+    async def restart_feed(self, symbols=None):
         async with self._restart_lock:  # защита от одновременных перезапусков (быстрые нажатия кнопок)
-            self.symbols = await self.resolve_symbols()
+            self.symbols = symbols if symbols is not None else await self.resolve_symbols()
             # данные нужны и по BTC (фильтр), и по монетам с открытыми бумажными сделками,
             # даже если их убрали из списка: иначе сделка не закроется
             extra = {"BTCUSDT"} | {t["symbol"] for t in self.paper.open.values()}
@@ -104,15 +173,24 @@ class Engine:
 
     async def _auto_refresh(self):
         while True:
-            await asyncio.sleep(1800)
-            if self.s.get("coin_mode") == "auto":
-                try:
-                    new = await self.resolve_symbols()
-                    if set(new) != set(self.symbols):
-                        await self.restart_feed()
-                        self.say(f"🔄 Обновил список монет (auto): {', '.join(new)}")
-                except Exception:
-                    log.exception("auto refresh")
+            await asyncio.sleep(max(5, self.s.get("refresh_min")) * 60)
+            if self.s.get("coin_mode") == "manual":
+                continue
+            try:
+                old = set(self.symbols)
+                new = await self.resolve_symbols()
+                if set(new) != old:
+                    await self.restart_feed(new)
+                    added = [f"{s.replace('USDT', '')} ({self.coin_tags.get(s, '')})" for s in new if s not in old]
+                    removed = [s.replace("USDT", "") for s in old if s not in new]
+                    msg = ["🔄 <b>Обновил список монет</b>"]
+                    if added:
+                        msg.append("Добавил: " + ", ".join(added))
+                    if removed:
+                        msg.append("Убрал: " + ", ".join(removed))
+                    self.say("\n".join(msg))
+            except Exception:
+                log.exception("auto refresh")
 
     def say(self, text):
         self.outbox.put_nowait(text)
@@ -166,7 +244,7 @@ class Engine:
         last = self.price(sym)
         if not book or not book.bids or not book.asks or not last:
             return
-        p = lambda k: self.s.get(k, sym)  # noqa: E731
+        p = lambda k: self.eff(k, sym)  # noqa: E731
         on = self.s["signals_on"]
         tracker = self.walls[sym]
         events = tracker.scan(book, now, p)
@@ -357,9 +435,17 @@ class Engine:
         now = time.time()
         mid = book.mid()
         ws = sorted(tr.walls.values(), key=lambda w: -w.price)
+        thr = self.eff("min_wall_usd", sym)
+        if sym in self.s["overrides"] and "min_wall_usd" in self.s["overrides"][sym]:
+            how = "своя настройка"
+        elif self.s.get("auto_scale"):
+            how = "авто от оборота"
+        else:
+            how = "общая настройка"
+        head = f"<b>{sym}</b> · цена {fp(mid)}\nПорог плотности: {fusd(thr)} ({how})"
         if not ws:
-            return f"<b>{sym}</b> · цена {fp(mid)}\nПлотностей по текущим порогам нет."
-        lines = [f"<b>{sym}</b> · цена {fp(mid)}"]
+            return head + "\nПлотностей по текущим порогам нет."
+        lines = [head]
         for w in ws:
             dist = (w.price / mid - 1) * 100
             icon = "🟥" if w.side == "ask" else "🟩"

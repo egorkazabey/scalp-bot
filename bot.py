@@ -19,7 +19,9 @@ from paper import today_start
 log = logging.getLogger("bot")
 
 GROUPS = {
-    "coins": ("🪙 Монеты и стакан", ["coin_mode", "auto_top_n", "auto_min_turnover", "ob_depth"]),
+    "coins": ("🪙 Монеты и стакан", ["coin_mode", "auto_top_n", "movers_n", "auto_min_turnover", "max_coins",
+                                    "refresh_min", "ob_depth"]),
+    "scale": ("📐 Автоподстройка порогов", ["auto_scale", "wall_turnover_pct", "liq_turnover_pct"]),
     "walls": ("🧱 Плотности", ["min_wall_usd", "wall_mult", "wall_max_dist_pct", "max_walls_side", "min_wall_age_sec",
                               "min_trust", "approach_pct"]),
     "flow": ("📊 Объём и ликвидации", ["vol_mult", "vol_min_move_pct", "vol_min_usd", "liq_usd", "liq_mode"]),
@@ -28,12 +30,20 @@ GROUPS = {
                                             "max_open", "daily_loss_pct", "fee_pct", "maker_fee_pct", "slippage_pct"]),
     "general": ("⚙️ Общее", ["cooldown_sec", "btc_filter", "btc_filter_pct"]),
 }
-FEED_KEYS = {"coin_mode", "auto_top_n", "auto_min_turnover", "ob_depth"}
+FEED_KEYS = {"coin_mode", "auto_top_n", "movers_n", "auto_min_turnover", "max_coins", "ob_depth"}
+MODES = {
+    "manual": "свой список",
+    "auto": "топ по обороту",
+    "movers": "топ роста и падения за 24ч",
+    "mix": "свой список + оборот + рост/падение",
+}
 
 HELP = """<b>Команды</b>
 /menu - главное меню
 /status - состояние бота
 /coins - монеты · /add SOL ETH · /remove SOL
+/movers 5 - топ-5 роста и топ-5 падения за 24ч
+/mix - свой список + топ по обороту + рост/падение
 /auto 15 - топ-15 монет по обороту · /manual - свой список
 /walls SOL - текущие плотности по монете
 /signals - последние сигналы
@@ -81,7 +91,7 @@ class TgBot:
         cmds = {
             "menu": self.cmd_menu, "help": self.cmd_help, "status": self.cmd_status,
             "coins": self.cmd_coins, "add": self.cmd_add, "remove": self.cmd_remove,
-            "auto": self.cmd_auto, "manual": self.cmd_manual, "walls": self.cmd_walls,
+            "auto": self.cmd_auto, "manual": self.cmd_manual, "movers": self.cmd_movers, "mix": self.cmd_mix, "walls": self.cmd_walls,
             "signals": self.cmd_signals, "stats": self.cmd_stats, "trades": self.cmd_trades,
             "settings": self.cmd_settings, "set": self.cmd_set, "unset": self.cmd_unset,
             "pause": self.cmd_pause, "resume": self.cmd_resume,
@@ -195,23 +205,34 @@ class TgBot:
 
     def screen_coins(self):
         mode = self.s.get("coin_mode")
-        syms = self.engine.symbols
-        text = [f"<b>Монеты</b> · режим <b>{mode}</b>"]
-        if mode == "auto":
-            text.append(f"Топ-{self.s.get('auto_top_n')} по обороту (от {fusd(self.s.get('auto_min_turnover'))}), "
-                        "обновляется каждые 30 мин.")
-        text.append(", ".join(syms) or "список пуст")
+        e = self.engine
+        text = [f"<b>Монеты</b> · режим <b>{mode}</b>: {MODES.get(mode, mode)}"]
+        if mode != "manual":
+            text.append(f"Только монеты с оборотом от {fusd(self.s.get('auto_min_turnover'))} за 24ч, "
+                        f"список обновляется каждые {self.s.get('refresh_min')} мин.")
+        text.append("")
+        for s in e.symbols:
+            ch = e.coin_change(s)
+            ch_txt = f"{ch:+.1f}%" if ch is not None else ""
+            tag = e.coin_tags.get(s, "")
+            tag = "" if tag.startswith(("📈", "📉")) else f" · {tag}"
+            text.append(f"<code>{s.replace('USDT', ''):<10}</code> {ch_txt}{tag}")
+        if not e.symbols:
+            text.append("список пуст")
         ov = self.s["overrides"]
         if ov:
             text.append("\n<b>Настройки по монетам:</b>")
             for sym, d in ov.items():
                 text.append(f"{sym}: " + ", ".join(f"{k}={fval(k, v)}" for k, v in d.items()))
         rows = []
-        if mode == "manual":
+        if mode in ("manual", "mix"):
             btns = [B(f"❌ {s.replace('USDT', '')}", callback_data=f"rm:{s}") for s in self.s["coins"]]
             rows += [btns[i:i + 3] for i in range(0, len(btns), 3)]
-            rows.append([B("➕ Добавить монету", callback_data="ask:add")])
-        rows.append([B("🔀 Режим: " + ("→ auto" if mode == "manual" else "→ manual"), callback_data="toggle:mode")])
+            rows.append([B("➕ Добавить свою монету", callback_data="ask:add")])
+        rows.append([B(("● " if mode == m else "") + label, callback_data=f"mode:{m}")
+                     for m, label in (("manual", "Свои"), ("auto", "Объём"), ("movers", "Рост/падение"),
+                                      ("mix", "Всё"))])
+        rows.append([B("🔄 Обновить", callback_data="scr:coins")])
         rows.append([B("🧱 Плотности по монете", callback_data="ask:walls")])
         rows.append(self.BACK)
         return "\n".join(text), InlineKeyboardMarkup(rows)
@@ -375,7 +396,7 @@ class TgBot:
         good = [s for s in syms if s not in bad and s not in self.s["coins"]]
         if good:
             self.s["coins"] = self.s["coins"] + good
-            if self.s.get("coin_mode") == "manual":
+            if self.s.get("coin_mode") in ("manual", "mix"):
                 await self.engine.restart_feed()
         msg = []
         if good:
@@ -384,8 +405,8 @@ class TgBot:
             msg.append("❌ Нет на Bybit фьючерсах: " + ", ".join(bad))
         if not msg:
             msg.append("Уже в списке.")
-        if self.s.get("coin_mode") == "auto":
-            msg.append("ℹ️ Сейчас режим auto, свой список заработает после /manual")
+        if self.s.get("coin_mode") in ("auto", "movers"):
+            msg.append("ℹ️ Сейчас авто-режим, свои монеты заработают в /manual или /mix")
         await self._reply(update, "\n".join(msg))
 
     async def cmd_add(self, update, ctx):
@@ -402,21 +423,28 @@ class TgBot:
         syms = [norm_symbol(n) for n in ctx.args]
         syms += ["1000" + s for s in syms]
         self.s["coins"] = [c for c in self.s["coins"] if c not in syms]
-        if self.s.get("coin_mode") == "manual":
+        if self.s.get("coin_mode") in ("manual", "mix"):
             await self.engine.restart_feed()
         await self._reply(update, "Готово. Сейчас: " + ", ".join(self.s["coins"]))
 
-    async def cmd_auto(self, update, ctx):
-        if ctx.args:
-            self.s.set("auto_top_n", ctx.args[0])
-        self.s.set("coin_mode", "auto")
+    async def _set_mode(self, update, mode, n_key=None, n=None):
+        if n_key and n:
+            self.s.set(n_key, n)
+        self.s.set("coin_mode", mode)
         await self.engine.restart_feed()
-        await self._reply(update, "🔀 Режим auto: " + ", ".join(self.engine.symbols))
+        await self._reply(update, *self.screen_coins())
+
+    async def cmd_auto(self, update, ctx):
+        await self._set_mode(update, "auto", "auto_top_n", ctx.args[0] if ctx.args else None)
+
+    async def cmd_movers(self, update, ctx):
+        await self._set_mode(update, "movers", "movers_n", ctx.args[0] if ctx.args else None)
+
+    async def cmd_mix(self, update, ctx):
+        await self._set_mode(update, "mix")
 
     async def cmd_manual(self, update, ctx):
-        self.s.set("coin_mode", "manual")
-        await self.engine.restart_feed()
-        await self._reply(update, "🔀 Режим manual: " + ", ".join(self.engine.symbols))
+        await self._set_mode(update, "manual")
 
     async def cmd_walls(self, update, ctx):
         if not ctx.args:
@@ -517,11 +545,10 @@ class TgBot:
             if arg == "pause":
                 self.s["paused"] = not self.s["paused"]
                 await self._reply(update, self.text_status(), self.kb_main(), edit=True)
-            elif arg == "mode":
-                new = "auto" if self.s.get("coin_mode") == "manual" else "manual"
-                self.s.set("coin_mode", new)
-                await self.engine.restart_feed()
-                await self._reply(update, *self.screen_coins(), edit=True)
+        elif kind == "mode":
+            self.s.set("coin_mode", arg)
+            await self.engine.restart_feed()
+            await self._reply(update, *self.screen_coins(), edit=True)
         elif kind == "sig":
             self.s["signals_on"][arg] = not self.s["signals_on"][arg]
             self.s.save()
