@@ -71,8 +71,14 @@ class PaperTrader:
         bal = self.balance()
         if bal <= 0:
             return None, "бумажный баланс закончился, сбрось счёт"
-        risk_usd = bal * self.s.get("risk_pct") / 100
-        notional = min(risk_usd / risk_dist, bal * self.s.get("max_leverage"))
+        lev = self.s.get("max_leverage")
+        if self.s.get("size_mode") == "margin":
+            # фиксированный залог: margin_pct% баланса x плечо
+            notional = bal * self.s.get("margin_pct") / 100 * lev
+        else:
+            # фиксированный риск: на стопе теряем risk_pct% баланса (без учёта комиссий)
+            risk_usd = bal * self.s.get("risk_pct") / 100
+            notional = min(risk_usd / risk_dist, bal * lev)
         qty = notional / entry
         if book is not None:
             fill = self.walk_book(book, sig["side"], qty)

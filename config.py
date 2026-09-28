@@ -47,8 +47,11 @@ PARAMS = {
     # --- риск и бумажная торговля ---
     "paper_enabled":    (True,     bool,  "Открывать бумажные сделки по сигналам"),
     "start_balance":    (1000.0,   float, "Стартовый виртуальный баланс, $"),
-    "risk_pct":         (1.0,      float, "Риск на сделку, % от баланса"),
-    "max_leverage":     (10.0,     float, "Макс. плечо для расчёта размера позиции"),
+    "size_mode":        ("risk",   str,   "Размер позиции: risk (теряем risk_pct% на стопе) или "
+                                          "margin (залог margin_pct% от баланса x плечо)"),
+    "risk_pct":         (1.0,      float, "Режим risk: сколько % баланса теряем, если сработал стоп"),
+    "margin_pct":       (1.0,      float, "Режим margin: сколько % баланса идёт в залог сделки"),
+    "max_leverage":     (10.0,     float, "Плечо (в режиме risk это верхний предел)"),
     "rr":               (2.0,      float, "Соотношение прибыль/риск для тейка"),
     "sl_buffer_pct":    (0.1,      float, "Стоп за плотностью с запасом, %"),
     "default_sl_pct":   (0.35,     float, "Стоп для сигналов без плотности, %"),
@@ -120,6 +123,8 @@ def _cast(key, raw):
 def _validate(key, val):
     if key == "coin_mode" and val not in ("manual", "auto", "movers", "mix"):
         raise ValueError("manual, auto, movers или mix")
+    if key == "size_mode" and val not in ("risk", "margin"):
+        raise ValueError("risk или margin")
     if key == "liq_mode" and val not in ("reversal", "momentum"):
         raise ValueError("reversal или momentum")
     if key == "ob_depth" and val not in (50, 200, 1000):

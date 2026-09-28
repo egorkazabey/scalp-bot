@@ -396,7 +396,11 @@ class Engine:
         tp_pct = (sig["tp"] / pr - 1) * 100
         lines.append(f"Стоп: <code>{fp(sig['sl'])}</code> ({sl_pct:+.2f}%) · Тейк: <code>{fp(sig['tp'])}</code> ({tp_pct:+.2f}%)")
         if trade:
-            lines.append(f"📝 Бумажная сделка #{trade['id']}: {trade['qty']:.4g} на {fusd(trade['qty'] * trade['entry'])}")
+            notional = trade["qty"] * trade["entry"]
+            lev = self.s.get("max_leverage")
+            risk = abs(trade["entry"] - trade["sl"]) * trade["qty"]
+            lines.append(f"📝 Бумажная сделка #{trade['id']}: позиция {fusd(notional)} "
+                         f"(залог {fusd(notional / lev)} x{lev:g}), на стопе -{fusd(risk)} + комиссия")
         elif why and self.s.get("paper_enabled"):
             lines.append(f"📝 Сделка не открыта: {why}")
         lines.append(f"<i>сигнал #{sig['id']}</i>")
