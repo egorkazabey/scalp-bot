@@ -288,7 +288,8 @@ class Engine:
                     dist = (mid - w.price) / w.price * 100
                 else:
                     dist = (w.price - mid) / mid * 100
-                if 0 <= dist <= p("approach_pct"):
+                # цена должна прийти к плотности издалека, а не просто стоять рядом с момента её появления
+                if 0 <= dist <= p("approach_pct") and w.far >= p("approach_pct") * 1.5:
                     w.signaled = True
                     side = "LONG" if w.side == "bid" else "SHORT"
                     buf = p("sl_buffer_pct") / 100
@@ -477,13 +478,13 @@ class Engine:
                              f"x{w.ratio:.0f} к соседям · {fdur(w.age(now))} · доверие {w.trust(now)}")
         else:
             lines.append("\nПлотностей по текущим порогам нет.")
-        # самые крупные заявки в зоне поиска: видно, насколько они не дотягивают до порога
-        lines.append(f"\n<b>Крупнейшие заявки в пределах {max_dist * 100:g}%:</b>")
-        for side, levels, icon in (("ask", book.asks, "🔸"), ("bid", book.bids, "🔹")):
-            near = sorted(((px, sz * px) for px, sz in levels.items() if abs(px - mid) / mid <= max_dist),
-                          key=lambda x: -x[1])[:3]
-            for px, usd in sorted(near, key=lambda x: -x[0]):
-                lines.append(f"{icon} <code>{fp(px)}</code> ({(px / mid - 1) * 100:+.2f}%) {fusd(usd)}")
+            # самые крупные заявки в зоне поиска: видно, насколько они не дотягивают до порога
+            lines.append(f"\n<b>Крупнейшие заявки в пределах {max_dist * 100:g}%:</b>")
+            for side, levels, icon in (("ask", book.asks, "🔸"), ("bid", book.bids, "🔹")):
+                near = sorted(((px, sz * px) for px, sz in levels.items() if abs(px - mid) / mid <= max_dist),
+                              key=lambda x: -x[1])[:3]
+                for px, usd in sorted(near, key=lambda x: -x[0]):
+                    lines.append(f"{icon} <code>{fp(px)}</code> ({(px / mid - 1) * 100:+.2f}%) {fusd(usd)}")
         bd, ad = book_depth(book, mid)
         lines.append(f"\nГлубина стакана ±1%: bid {fusd(bd)} · ask {fusd(ad)}")
         if self.thin(sym):
@@ -493,6 +494,10 @@ class Engine:
         hi = (max(book.asks) / mid - 1) * 100
         lines.append(f"<i>Стакан виден от {lo:+.2f}% до {hi:+.2f}% ({len(book.bids) + len(book.asks)} уровней)</i>")
         if min(-lo, hi) < max_dist * 100 * 0.8:
-            lines.append("<i>Стакан виден уже зоны поиска: дальние плотности не видны. "
-                         "Можно поднять глубину: /set ob_depth 1000</i>")
+            if self.s.get("ob_depth") < 1000:
+                lines.append("<i>Стакан виден уже зоны поиска: дальние плотности не видны. "
+                             "Можно поднять глубину: /set ob_depth 1000</i>")
+            else:
+                lines.append("<i>Это максимум, который отдаёт Bybit (1000 уровней). "
+                             "Дальние плотности по этой монете не видны.</i>")
         return "\n".join(lines)

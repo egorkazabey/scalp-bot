@@ -4,7 +4,7 @@ from collections import deque
 
 class Wall:
     __slots__ = ("side", "price", "usd", "max_usd", "min_usd", "first_seen", "last_seen",
-                 "traded_usd", "touched", "moves", "signaled", "ratio")
+                 "traded_usd", "touched", "moves", "signaled", "ratio", "far")
 
     def __init__(self, side, price, usd, now, moves=0):
         self.side = side          # "bid" (поддержка) или "ask" (сопротивление)
@@ -19,6 +19,7 @@ class Wall:
         self.moves = moves        # сколько раз она «переезжала» (признак спуфинга)
         self.signaled = False
         self.ratio = 0.0          # во сколько раз больше соседних уровней
+        self.far = 0.0            # самое большое расстояние цены от плотности за её жизнь, %
 
     def age(self, now):
         return now - self.first_seen
@@ -114,7 +115,9 @@ class WallTracker:
 
         for key, (usd, ratio) in found.items():
             w = self.walls.get(key)
+            dist = abs(key[1] - mid) / mid * 100
             if w:
+                w.far = max(w.far, dist)
                 w.ratio = ratio
                 w.usd = usd
                 w.max_usd = max(w.max_usd, usd)
@@ -130,6 +133,7 @@ class WallTracker:
                         break
                 self.walls[key] = Wall(side, px, usd, now, moves)
                 self.walls[key].ratio = ratio
+                self.walls[key].far = dist
         return events
 
     def on_trade(self, price, usd, touch_pct):
