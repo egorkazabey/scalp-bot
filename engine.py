@@ -13,15 +13,26 @@ log = logging.getLogger("engine")
 
 # ---------- форматирование ----------
 def fp(p):
+    """Цена с 7 значащими цифрами: хватает для шага цены любой монеты (1.09125, 2674.05, 0.0001234)."""
     if p is None:
         return "-"
-    if p >= 1000:
-        return f"{p:,.1f}".replace(",", " ")
-    if p >= 10:
-        return f"{p:.2f}"
-    if p >= 1:
-        return f"{p:.4f}"
-    return f"{p:.6g}"
+    s = f"{p:.7g}"
+    if "e" in s:
+        s = f"{p:.12f}".rstrip("0").rstrip(".")
+    if "." in s:
+        s = s.rstrip("0").rstrip(".") if abs(p) < 1000 else s
+    whole, _, frac = s.partition(".")
+    if len(whole.lstrip("-")) > 3:
+        whole = f"{int(whole):,}".replace(",", " ")
+    return whole + ("." + frac if frac else "")
+
+
+def book_depth(book, mid, pct=1.0):
+    """Сумма заявок в $ в пределах pct% от цены: (bid, ask)."""
+    lim = pct / 100
+    bid = sum(px * sz for px, sz in book.bids.items() if (mid - px) / mid <= lim)
+    ask = sum(px * sz for px, sz in book.asks.items() if (px - mid) / mid <= lim)
+    return bid, ask
 
 
 def fusd(v):
@@ -62,6 +73,7 @@ class Engine:
         self._restart_lock = asyncio.Lock()
         self.coin_tags = {}  # монета -> почему она в списке (свой / объём / рост / падение)
         self._picks = {}     # прошлый выбор по каждой категории, для устойчивости списка
+        self.depth = {}      # монета -> глубина стакана в пределах 1% (меньшая из сторон), $
         self._stale_alerted = False
 
     # ---------- жизненный цикл ----------
@@ -249,6 +261,7 @@ class Engine:
         tracker = self.walls[sym]
         events = tracker.scan(book, now, p)
         mid = book.mid()
+        self.depth[sym] = min(book_depth(book, mid))
 
         # пробой: плотность съели, цена прошла через неё
         if on["breakout"]:
@@ -313,8 +326,13 @@ class Engine:
                 self.emit(sym, "liq", side, last, sl, {"longs": longs, "shorts": shorts})
 
     # ---------- сигнал ----------
+    def thin(self, sym):
+        """Тонкий стакан: сделка сама сдвинет цену, сигналы по такой монете не даём."""
+        d = self.depth.get(sym)
+        return d is not None and d < self.eff("min_book_usd", sym)
+
     def emit(self, sym, typ, side, price, sl, details):
-        if self.s["paused"]:
+        if self.s["paused"] or self.thin(sym):
             return
         now = time.time()
         key = (sym, typ, side)
@@ -342,7 +360,7 @@ class Engine:
         sig = {"ts": now, "symbol": sym, "type": typ, "side": side, "price": price,
                "sl": sl, "tp": tp, "details": details}
         sig["id"] = self.db.add_signal(sig)
-        trade, why = self.paper.try_open(sig, sig["id"])
+        trade, why = self.paper.try_open(sig, sig["id"], book=self.feed.books.get(sym))
         if self.s["notify"].get(typ, True):
             self.say(self._fmt_signal(sig, trade, why))
 
@@ -469,6 +487,11 @@ class Engine:
                           key=lambda x: -x[1])[:3]
             for px, usd in sorted(near, key=lambda x: -x[0]):
                 lines.append(f"{icon} <code>{fp(px)}</code> ({(px / mid - 1) * 100:+.2f}%) {fusd(usd)}")
+        bd, ad = book_depth(book, mid)
+        lines.append(f"\nГлубина стакана ±1%: bid {fusd(bd)} · ask {fusd(ad)}")
+        if self.thin(sym):
+            lines.append(f"⚠️ <b>Тонкий стакан</b> (меньше {fusd(self.eff('min_book_usd', sym))}): "
+                         "сигналы по монете не даются, проскальзывание съест прибыль")
         lo = (min(book.bids) / mid - 1) * 100
         hi = (max(book.asks) / mid - 1) * 100
         lines.append(f"<i>Стакан виден от {lo:+.2f}% до {hi:+.2f}% ({len(book.bids) + len(book.asks)} уровней)</i>")

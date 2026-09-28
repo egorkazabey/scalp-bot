@@ -34,8 +34,24 @@ class PaperTrader:
                 total += sign * (p - t["entry"]) * t["qty"] - t["fees"]
         return total
 
-    def try_open(self, sig, signal_id):
-        """Возвращает (trade или None, причина отказа)."""
+    @staticmethod
+    def walk_book(book, side, qty):
+        """Средняя цена исполнения рыночного ордера на qty по текущему стакану.
+        None, если стакана не хватило."""
+        if book is None:
+            return None
+        levels = sorted(book.asks.items()) if side == "LONG" else sorted(book.bids.items(), reverse=True)
+        left, cost = qty, 0.0
+        for px, sz in levels:
+            take = min(left, sz)
+            cost += take * px
+            left -= take
+            if left <= 1e-12:
+                return cost / qty
+        return None
+
+    def try_open(self, sig, signal_id, book=None):
+        """Возвращает (trade или None, причина отказа). С book вход считается проходом по стакану."""
         if not self.s.get("paper_enabled"):
             return None, "бумажная торговля выключена"
         if any(t["symbol"] == sig["symbol"] for t in self.open.values()):
@@ -58,6 +74,15 @@ class PaperTrader:
         risk_usd = bal * self.s.get("risk_pct") / 100
         notional = min(risk_usd / risk_dist, bal * self.s.get("max_leverage"))
         qty = notional / entry
+        if book is not None:
+            fill = self.walk_book(book, sig["side"], qty)
+            if fill is None:
+                return None, "в стакане не хватает заявок на такой объём"
+            # берём худшее из фиксированного проскальзывания и реального прохода по стакану
+            entry = max(entry, fill) if sign == 1 else min(entry, fill)
+            if (sign == 1 and sig["sl"] >= entry) or (sign == -1 and sig["sl"] <= entry):
+                return None, "проскальзывание по стакану дошло до стопа"
+            notional = qty * entry
         t = {
             "signal_id": signal_id, "symbol": sig["symbol"], "type": sig["type"],
             "side": sig["side"], "entry": entry, "qty": qty, "sl": sig["sl"], "tp": sig["tp"],

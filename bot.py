@@ -20,7 +20,7 @@ log = logging.getLogger("bot")
 
 GROUPS = {
     "coins": ("🪙 Монеты и стакан", ["coin_mode", "auto_top_n", "movers_n", "auto_min_turnover", "max_coins",
-                                    "refresh_min", "ob_depth"]),
+                                    "refresh_min", "ob_depth", "min_book_usd"]),
     "scale": ("📐 Автоподстройка порогов", ["auto_scale", "wall_turnover_pct", "liq_turnover_pct"]),
     "walls": ("🧱 Плотности", ["min_wall_usd", "wall_mult", "wall_max_dist_pct", "max_walls_side", "min_wall_age_sec",
                               "min_trust", "approach_pct"]),
@@ -216,6 +216,8 @@ class TgBot:
             ch_txt = f"{ch:+.1f}%" if ch is not None else ""
             tag = e.coin_tags.get(s, "")
             tag = "" if tag.startswith(("📈", "📉")) else f" · {tag}"
+            if e.thin(s):
+                tag += " · ⚠️ тонкий стакан"
             text.append(f"<code>{s.replace('USDT', ''):<10}</code> {ch_txt}{tag}")
         if not e.symbols:
             text.append("список пуст")
