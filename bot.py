@@ -226,11 +226,12 @@ class TgBot:
                 text.append(f"{sym}: " + ", ".join(f"{k}={fval(k, v)}" for k, v in d.items()))
         rows = []
         if mode in ("manual", "mix"):
-            btns = [B(f"❌ {s.replace('USDT', '')}", callback_data=f"rm:{s}") for s in self.s["coins"]]
+            text.append("\n<i>Кнопки «✖» ниже убирают монету из твоего списка.</i>")
+            btns = [B(f"✖ {s.replace('USDT', '')}", callback_data=f"rm:{s}") for s in self.s["coins"]]
             rows += [btns[i:i + 3] for i in range(0, len(btns), 3)]
             rows.append([B("➕ Добавить свою монету", callback_data="ask:add")])
         rows.append([B(("● " if mode == m else "") + label, callback_data=f"mode:{m}")
-                     for m, label in (("manual", "Свои"), ("auto", "Объём"), ("movers", "Рост/падение"),
+                     for m, label in (("manual", "Свои"), ("auto", "Объём"), ("movers", "±24ч"),
                                       ("mix", "Всё"))])
         rows.append([B("🔄 Обновить", callback_data="scr:coins")])
         rows.append([B("🧱 Плотности по монете", callback_data="ask:walls")])
