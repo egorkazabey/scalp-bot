@@ -327,13 +327,17 @@ class TgBot:
         rows = []
         if e.paper.open:
             lines.append("<b>Открытые:</b>")
+            lines.append("<i>Минус сразу после входа это комиссия за вход, она списывается сразу.</i>")
             for t in e.paper.open.values():
                 p = prices.get(t["symbol"])
                 sign = 1 if t["side"] == "LONG" else -1
                 u = sign * (p - t["entry"]) * t["qty"] - t["fees"] if p else 0
-                lines.append(f"#{t['id']} {t['side']} {t['symbol']} вход {fp(t['entry'])} сейчас {fp(p)} "
-                             f"· {u:+.2f}$ · стоп {fp(t['sl'])} тейк {fp(t['tp'])} · "
-                             f"{fdur(time.time() - t['open_ts'])}")
+                to_sl = abs(p - t["sl"]) / p * 100 if p else 0
+                to_tp = abs(t["tp"] - p) / p * 100 if p else 0
+                lines.append(f"#{t['id']} {t['side']} {t['symbol']} · {fdur(time.time() - t['open_ts'])}\n"
+                             f"   вход {fp(t['entry'])} → сейчас {fp(p)} · <b>{u:+.2f}$</b> "
+                             f"(вкл. комиссию входа {t['fees']:.2f}$)\n"
+                             f"   стоп {fp(t['sl'])} (ещё {to_sl:.2f}%) · тейк {fp(t['tp'])} (ещё {to_tp:.2f}%)")
                 rows.append([B(f"Закрыть #{t['id']} {t['symbol']}", callback_data=f"close:{t['id']}")])
         else:
             lines.append("Открытых сделок нет.")

@@ -398,9 +398,11 @@ class Engine:
         if trade:
             notional = trade["qty"] * trade["entry"]
             lev = self.s.get("max_leverage")
-            risk = abs(trade["entry"] - trade["sl"]) * trade["qty"]
+            fee = self.s.get("fee_pct") / 100
+            risk = (abs(trade["entry"] - trade["sl"]) * trade["qty"] + notional * (2 * fee)
+                    + trade["sl"] * trade["qty"] * self.s.get("slippage_pct") / 100)
             lines.append(f"📝 Бумажная сделка #{trade['id']}: позиция {fusd(notional)} "
-                         f"(залог {fusd(notional / lev)} x{lev:g}), на стопе -{fusd(risk)} + комиссия")
+                         f"(залог {fusd(notional / lev)} x{lev:g}), на стопе ≈ -{fusd(risk)} с комиссиями")
         elif why and self.s.get("paper_enabled"):
             lines.append(f"📝 Сделка не открыта: {why}")
         lines.append(f"<i>сигнал #{sig['id']}</i>")

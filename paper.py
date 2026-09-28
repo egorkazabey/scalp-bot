@@ -76,9 +76,11 @@ class PaperTrader:
             # фиксированный залог: margin_pct% баланса x плечо
             notional = bal * self.s.get("margin_pct") / 100 * lev
         else:
-            # фиксированный риск: на стопе теряем risk_pct% баланса (без учёта комиссий)
+            # фиксированный риск: на стопе теряем risk_pct% баланса ВМЕСТЕ с комиссиями за вход
+            # и выход и проскальзыванием на стопе
             risk_usd = bal * self.s.get("risk_pct") / 100
-            notional = min(risk_usd / risk_dist, bal * lev)
+            loss_per_usd = risk_dist + 2 * fee + slip
+            notional = min(risk_usd / loss_per_usd, bal * lev)
         qty = notional / entry
         if book is not None:
             fill = self.walk_book(book, sig["side"], qty)
