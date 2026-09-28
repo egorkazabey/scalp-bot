@@ -14,6 +14,11 @@ REST_URL = "https://api.bybit.com"
 SYMBOLS_PER_CONN = 10
 
 
+def _ws_timeout():
+    # если 60 сек нет ни одного сообщения, соединение считаем мёртвым и переподключаемся
+    return aiohttp.ClientWSTimeout(ws_receive=60, ws_close=10)
+
+
 class OrderBook:
     __slots__ = ("bids", "asks", "ts")
 
@@ -69,13 +74,14 @@ class BybitFeed:
 
     async def session(self):
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
+            self._session = aiohttp.ClientSession()
         return self._session
 
     # ---------- REST ----------
     async def fetch_tickers(self):
         s = await self.session()
-        async with s.get(f"{REST_URL}/v5/market/tickers", params={"category": "linear"}) as r:
+        async with s.get(f"{REST_URL}/v5/market/tickers", params={"category": "linear"},
+                         timeout=aiohttp.ClientTimeout(total=20)) as r:
             data = await r.json()
         return data["result"]["list"]
 
@@ -93,16 +99,14 @@ class BybitFeed:
         return {t["symbol"] for t in items}
 
     # ---------- WebSocket ----------
-    async def start(self, symbols, depth=None):
+    async def start(self, symbols, depth=None, extra=()):
+        """symbols: монеты для сигналов. extra: монеты, по которым нужны только данные
+        (BTC для BTC-фильтра, монеты с открытыми бумажными сделками)."""
         await self.stop()
         if depth:
             self.depth = depth
         self.symbols = list(dict.fromkeys(symbols))
-        if "BTCUSDT" not in self.symbols:
-            # BTC нужен всегда для BTC-фильтра, но сигналы по нему даём, только если он в списке
-            feed_syms = self.symbols + ["BTCUSDT"]
-        else:
-            feed_syms = self.symbols
+        feed_syms = list(dict.fromkeys(self.symbols + [s for s in extra if s not in self.symbols]))
         self.books = {s: OrderBook() for s in feed_syms}
         for i in range(0, len(feed_syms), SYMBOLS_PER_CONN):
             chunk = feed_syms[i:i + SYMBOLS_PER_CONN]
@@ -133,7 +137,8 @@ class BybitFeed:
         while True:
             try:
                 s = await self.session()
-                async with s.ws_connect(WS_URL, heartbeat=None, max_msg_size=0) as ws:
+                async with s.ws_connect(WS_URL, heartbeat=None, max_msg_size=0,
+                                        timeout=_ws_timeout()) as ws:
                     for i in range(0, len(topics), 10):
                         await ws.send_json({"op": "subscribe", "args": topics[i:i + 10]})
                     self.connected += 1

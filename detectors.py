@@ -141,10 +141,16 @@ class VolumeTracker:
 
     def check(self, now):
         """(объём за 60с, средний минутный, движение % за 60с) или None, если мало истории."""
-        if self.started is None or now - self.started < 600 or not self.trades:
+        while self.trades and self.trades[0][0] < now - 60:
+            self.trades.popleft()
+        if self.started is None or not self.trades:
             return None
         cur_m = int(now // 60)
-        hist = [self.minutes.get(m, 0) for m in range(cur_m - 31, cur_m - 1)]
+        first_full = int(self.started // 60) + 1  # первая полная минута после запуска
+        # берём только полные минуты с момента запуска, без текущей и предыдущей
+        hist = [self.minutes.get(m, 0) for m in range(max(first_full, cur_m - 31), cur_m - 1)]
+        if len(hist) < 8:
+            return None
         avg = sum(hist) / len(hist)
         vol = sum(u for _, u, _ in self.trades)
         p0 = self.trades[0][2]
@@ -185,7 +191,10 @@ class PriceHistory:
                 self.points.popleft()
 
     def ago(self, sec, now):
+        """Цена sec секунд назад или None, если история так далеко не покрывает."""
         target = now - sec
+        if not self.points or self.points[0][0] > target + 2:
+            return None
         best = None
         for ts, p in self.points:
             if ts <= target:

@@ -53,6 +53,17 @@ journalctl -u scalpbot -f           # логи в реальном времен�
 Копирование с компьютера на сервер: `scp -r scalp_bot root@IP_СЕРВЕРА:/opt/` и потом
 `sudo chown -R scalpbot:scalpbot /opt/scalp_bot`.
 
+## Обновление
+
+```bash
+cd /opt/scalp_bot
+sudo -u scalpbot git pull
+sudo -u scalpbot venv/bin/pip install -r requirements.txt
+sudo systemctl restart scalpbot
+```
+
+Настройки и статистика (папка `data/`) при обновлении сохраняются.
+
 ## Управление из Telegram
 
 Всё через /menu (кнопки): статус, монеты, типы сигналов, настройки, статистика, сделки, пауза.

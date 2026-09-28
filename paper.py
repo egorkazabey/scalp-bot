@@ -53,6 +53,8 @@ class PaperTrader:
         if risk_dist <= 0 or (sign == 1 and sig["sl"] >= entry) or (sign == -1 and sig["sl"] <= entry):
             return None, "стоп с неправильной стороны"
         bal = self.balance()
+        if bal <= 0:
+            return None, "бумажный баланс закончился, сбрось счёт"
         risk_usd = bal * self.s.get("risk_pct") / 100
         notional = min(risk_usd / risk_dist, bal * self.s.get("max_leverage"))
         qty = notional / entry
@@ -75,7 +77,8 @@ class PaperTrader:
             if (long and price <= t["sl"]) or (not long and price >= t["sl"]):
                 closed.append(self._close(tid, t["sl"], "стоп", slip=True))
             elif (long and price >= t["tp"]) or (not long and price <= t["tp"]):
-                closed.append(self._close(tid, t["tp"], "тейк", slip=False))
+                # тейк стоит лимитным ордером: без проскальзывания и с мейкерской комиссией
+                closed.append(self._close(tid, t["tp"], "тейк", slip=False, maker=True))
         return closed
 
     def check_timeouts(self, prices):
@@ -90,12 +93,13 @@ class PaperTrader:
         if tid in self.open:
             return self._close(tid, price, "вручную", slip=True)
 
-    def _close(self, tid, price, reason, slip):
+    def _close(self, tid, price, reason, slip, maker=False):
         t = self.open.pop(tid)
         sign = 1 if t["side"] == "LONG" else -1
         if slip:
             price = price * (1 - sign * self.s.get("slippage_pct") / 100)
-        fees = t["fees"] + t["qty"] * price * self.s.get("fee_pct") / 100
+        fee_pct = self.s.get("maker_fee_pct") if maker else self.s.get("fee_pct")
+        fees = t["fees"] + t["qty"] * price * fee_pct / 100
         pnl = sign * (price - t["entry"]) * t["qty"] - fees
         self.db.close_trade(tid, price, pnl, fees, reason)
         t.update(exit=price, pnl=pnl, fees=fees, reason=reason, close_ts=time.time())

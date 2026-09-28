@@ -59,6 +59,8 @@ class Engine:
         self.started_at = time.time()
         self.symbols = []
         self.last_error = None
+        self._restart_lock = asyncio.Lock()
+        self._stale_alerted = False
 
     # ---------- жизненный цикл ----------
     async def start(self):
@@ -84,25 +86,33 @@ class Engine:
         return list(self.s["coins"])
 
     async def restart_feed(self):
-        self.symbols = await self.resolve_symbols()
-        syms = set(self.symbols) | {"BTCUSDT"}
-        for d, cls in ((self.walls, None), (self.vol, VolumeTracker), (self.liq, LiqTracker), (self.hist, PriceHistory)):
-            for sym in list(d):
-                if sym not in syms:
-                    del d[sym]
-            for sym in syms:
-                if sym not in d:
-                    d[sym] = WallTracker(sym) if cls is None else cls()
-        await self.feed.start(self.symbols, depth=self.s.get("ob_depth"))
+        async with self._restart_lock:  # защита от одновременных перезапусков (быстрые нажатия кнопок)
+            self.symbols = await self.resolve_symbols()
+            # данные нужны и по BTC (фильтр), и по монетам с открытыми бумажными сделками,
+            # даже если их убрали из списка: иначе сделка не закроется
+            extra = {"BTCUSDT"} | {t["symbol"] for t in self.paper.open.values()}
+            syms = set(self.symbols) | extra
+            for d, cls in ((self.walls, None), (self.vol, VolumeTracker), (self.liq, LiqTracker),
+                           (self.hist, PriceHistory)):
+                for sym in list(d):
+                    if sym not in syms:
+                        del d[sym]
+                for sym in syms:
+                    if sym not in d:
+                        d[sym] = WallTracker(sym) if cls is None else cls()
+            await self.feed.start(self.symbols, depth=self.s.get("ob_depth"), extra=extra)
 
     async def _auto_refresh(self):
         while True:
             await asyncio.sleep(1800)
             if self.s.get("coin_mode") == "auto":
-                new = await self.resolve_symbols()
-                if set(new) != set(self.symbols):
-                    await self.restart_feed()
-                    self.say(f"🔄 Обновил список монет (auto): {', '.join(new)}")
+                try:
+                    new = await self.resolve_symbols()
+                    if set(new) != set(self.symbols):
+                        await self.restart_feed()
+                        self.say(f"🔄 Обновил список монет (auto): {', '.join(new)}")
+                except Exception:
+                    log.exception("auto refresh")
 
     def say(self, text):
         self.outbox.put_nowait(text)
@@ -144,8 +154,6 @@ class Engine:
     async def _loop(self):
         while True:
             await asyncio.sleep(0.5)
-            if self.s["paused"]:
-                continue
             now = time.time()
             for sym in self.symbols:
                 try:
@@ -228,6 +236,8 @@ class Engine:
 
     # ---------- сигнал ----------
     def emit(self, sym, typ, side, price, sl, details):
+        if self.s["paused"]:
+            return
         now = time.time()
         key = (sym, typ, side)
         if now - self.cooldown.get(key, 0) < self.s.get("cooldown_sec", sym):
@@ -314,13 +324,29 @@ class Engine:
                         continue
                     for col, sec in (("p1", 60), ("p5", 300), ("p15", 900)):
                         if r[col] is None and now - r["ts"] >= sec:
-                            px = h.ago(now - (r["ts"] + sec), now) or h.last
+                            px = h.ago(now - (r["ts"] + sec), now)
+                            if px is None and now - r["ts"] - sec < 30:
+                                px = h.last  # история ещё тонкая, но момент замера только что
                             if px:
                                 self.db.set_signal_outcome(r["id"], col, px)
                 for t in self.paper.check_timeouts(self.prices()):
                     self.say(self._fmt_close(t))
+                await self._watchdog(now)
             except Exception:
                 log.exception("slow loop")
+
+    async def _watchdog(self, now):
+        """Если данных с Bybit нет больше 90 сек, предупреждаем и перезапускаем поток."""
+        last = self.feed.last_msg
+        if last and now - last > 90:
+            if not self._stale_alerted:
+                self.say("⚠️ Нет данных с Bybit больше 90 сек, переподключаюсь...")
+                self._stale_alerted = True
+            await self.restart_feed()
+            self.feed.last_msg = now  # даём время на подключение
+        elif self._stale_alerted and last and now - last < 10:
+            self._stale_alerted = False
+            self.say("✅ Данные с Bybit снова идут")
 
     # ---------- для команд бота ----------
     def walls_text(self, sym):

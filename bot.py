@@ -8,7 +8,7 @@ import time
 from telegram import InlineKeyboardButton as B
 from telegram import InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
+from telegram.error import RetryAfter, TelegramError
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes,
                           MessageHandler, filters)
 
@@ -25,7 +25,7 @@ GROUPS = {
     "flow": ("📊 Объём и ликвидации", ["vol_mult", "vol_min_move_pct", "vol_min_usd", "liq_usd", "liq_mode"]),
     "risk": ("💼 Риск и бумажная торговля", ["paper_enabled", "start_balance", "risk_pct", "max_leverage",
                                             "rr", "sl_buffer_pct", "default_sl_pct", "max_hold_min",
-                                            "max_open", "daily_loss_pct", "fee_pct", "slippage_pct"]),
+                                            "max_open", "daily_loss_pct", "fee_pct", "maker_fee_pct", "slippage_pct"]),
     "general": ("⚙️ Общее", ["cooldown_sec", "btc_filter", "btc_filter_pct"]),
 }
 FEED_KEYS = {"coin_mode", "auto_top_n", "auto_min_turnover", "ob_depth"}
@@ -96,12 +96,15 @@ class TgBot:
     async def _post_init(self, app):
         await self.engine.start()
         app.create_task(self._sender())
-        await app.bot.set_my_commands([
-            ("menu", "Главное меню"), ("status", "Состояние"), ("coins", "Монеты"),
-            ("walls", "Плотности по монете"), ("signals", "Последние сигналы"),
-            ("stats", "Статистика"), ("trades", "Бумажные сделки"), ("settings", "Настройки"),
-            ("pause", "Пауза"), ("resume", "Продолжить"), ("help", "Все команды"),
-        ])
+        try:
+            await app.bot.set_my_commands([
+                ("menu", "Главное меню"), ("status", "Состояние"), ("coins", "Монеты"),
+                ("walls", "Плотности по монете"), ("signals", "Последние сигналы"),
+                ("stats", "Статистика"), ("trades", "Бумажные сделки"), ("settings", "Настройки"),
+                ("pause", "Пауза"), ("resume", "Продолжить"), ("help", "Все команды"),
+            ])
+        except TelegramError as e:
+            log.warning("set_my_commands failed: %s", e)
         if self.s["owner_id"]:
             await self._send("🚀 Бот запущен. /menu")
 
@@ -112,18 +115,23 @@ class TgBot:
         while True:
             text = await self.engine.outbox.get()
             await self._send(text)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.3)  # не упираться в лимиты Telegram при пачке сигналов
 
     async def _send(self, text, markup=None):
         if not self.s["owner_id"]:
             return
-        try:
-            await self.app.bot.send_message(self.s["owner_id"], text, parse_mode=ParseMode.HTML,
-                                            reply_markup=markup, disable_web_page_preview=True)
-        except TelegramError as e:
-            if "retry after" in str(e).lower():
-                await asyncio.sleep(5)
-            log.warning("send failed: %s", e)
+        for attempt in range(3):
+            try:
+                await self.app.bot.send_message(self.s["owner_id"], text, parse_mode=ParseMode.HTML,
+                                                reply_markup=markup, disable_web_page_preview=True)
+                return
+            except RetryAfter as e:
+                # Telegram просит подождать: ждём и отправляем снова, сообщение не теряется
+                ra = e.retry_after
+                await asyncio.sleep((ra.total_seconds() if hasattr(ra, "total_seconds") else float(ra)) + 1)
+            except TelegramError as e:
+                log.warning("send failed: %s", e)
+                await asyncio.sleep(2)
 
     def _guard(self, fn):
         async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -359,6 +367,10 @@ class TgBot:
             valid = await self.engine.feed.valid_symbols()
         except Exception:
             valid = None
+        if valid is not None:
+            # у мемкоинов на Bybit часто префикс 1000 (PEPE -> 1000PEPEUSDT)
+            syms = [s if s in valid or "1000" + s not in valid else "1000" + s for s in syms]
+        syms = list(dict.fromkeys(syms))
         bad = [s for s in syms if valid is not None and s not in valid]
         good = [s for s in syms if s not in bad and s not in self.s["coins"]]
         if good:
@@ -384,7 +396,11 @@ class TgBot:
         await self._add_coins(update, ctx.args)
 
     async def cmd_remove(self, update, ctx):
+        if not ctx.args:
+            await self._reply(update, "Формат: <code>/remove PEPE</code> или кнопки в /coins")
+            return
         syms = [norm_symbol(n) for n in ctx.args]
+        syms += ["1000" + s for s in syms]
         self.s["coins"] = [c for c in self.s["coins"] if c not in syms]
         if self.s.get("coin_mode") == "manual":
             await self.engine.restart_feed()

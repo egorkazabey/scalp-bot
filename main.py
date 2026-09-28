@@ -2,6 +2,7 @@
 import logging
 import os
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -20,6 +21,10 @@ def load_env(path=os.path.join(HERE, ".env")):
 
 def main():
     load_env()
+    # часовой пояс для «статистики за сегодня» и дневного лимита убытка
+    os.environ.setdefault("TZ", "Europe/Prague")
+    if hasattr(time, "tzset"):
+        time.tzset()
     from config import DATA_DIR, Settings
     from storage import Storage
     from bot import TgBot
