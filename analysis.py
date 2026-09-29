@@ -4,6 +4,7 @@
 в % от позиции, уже с комиссиями. Вывод по группе делаем, только если в ней достаточно
 сигналов и отличие от среднего больше двух стандартных ошибок (грубая проверка,
 что это не случайность)."""
+import html
 import math
 
 from config import SHORT_NAMES
@@ -106,7 +107,8 @@ def analyze(rows, min_n=15, title="всё время"):
             if st["se"] and abs(diff) > 2 * st["se"]:
                 mark = " ✅" if diff > 0 else " ❌"
                 findings.append((abs(diff), diff, gname, b, st))
-            table.append(f"{str(b)[:18]:<18} {st['n']:>4} {st['win']:>4.0f}% {st['mean']:>+7.3f}%{mark}")
+            table.append(html.escape(f"{str(b)[:18]:<18} {st['n']:>4} {st['win']:>4.0f}% {st['mean']:>+7.3f}%")
+                         + mark)
         if table:
             hdr = f"{'':<18} {'N':>4} {'плюс':>5} {'среднее':>8}"
             sections.append(f"<b>{gname}</b>\n<pre>{hdr}\n" + "\n".join(table) + "</pre>")
@@ -118,7 +120,7 @@ def analyze(rows, min_n=15, title="всё время"):
         for _, diff, g, b, st in findings[:8]:
             icon = "✅" if diff > 0 else "❌"
             verdict = "лучше среднего" if diff > 0 else "хуже среднего"
-            fl.append(f"{icon} <b>{g}: {b}</b>\n    {verdict}, {st['mean']:+.3f}% на сделку "
+            fl.append(f"{icon} <b>{html.escape(g)}: {html.escape(str(b))}</b>\n    {verdict}, {st['mean']:+.3f}% на сделку "
                       f"({st['n']} сигналов, в плюс {st['win']:.0f}%)")
         fl.append("<i>Показаны только отличия, которые вряд ли случайны.</i>")
         out += "\n" + "\n".join(fl)
