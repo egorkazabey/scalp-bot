@@ -215,8 +215,9 @@ class Engine:
             except Exception:
                 log.exception("auto refresh")
 
-    def say(self, text):
-        self.outbox.put_nowait(text)
+    def say(self, text, symbol=None):
+        """symbol: к сообщению добавится кнопка с графиком этой монеты на Bybit."""
+        self.outbox.put_nowait((text, symbol))
 
     def price(self, sym):
         h = self.hist.get(sym)
@@ -249,7 +250,7 @@ class Engine:
             self.hist[sym].add(ts, price)
             if has_open:
                 for t in self.paper.on_price(sym, price):
-                    self.say(self._fmt_close(t))
+                    self.say(self._fmt_close(t), t["symbol"])
                 has_open = any(t["symbol"] == sym for t in self.paper.open.values())
 
     def _on_liq(self, sym, ts, price, qty, pos_side):
@@ -425,7 +426,7 @@ class Engine:
             trade, why = self.paper.try_open(sig, sig["id"], book=self.feed.books.get(sym),
                                              maker_entry=maker_entry)
         if self.s["notify"].get(typ.split("_")[0], True):
-            self.say(self._fmt_signal(sig, trade, why))
+            self.say(self._fmt_signal(sig, trade, why), sym)
 
     # ---------- лимитки и подтверждения ----------
     def _check_limits(self, sym, price):
@@ -745,7 +746,7 @@ class Engine:
                             if px:
                                 self.db.set_signal_outcome(r["id"], col, px)
                 for t in self.paper.check_timeouts(self.prices()):
-                    self.say(self._fmt_close(t))
+                    self.say(self._fmt_close(t), t["symbol"])
                 self._timeout_virtual(now)
                 await self._watchdog(now)
             except Exception:

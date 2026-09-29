@@ -76,6 +76,15 @@ HELP = """📖 <b>Команды</b>
 <i>Числа можно писать как 500k, 2.5m или 0,3</i>"""
 
 
+def chart_url(sym):
+    """График бессрочного фьючерса на Bybit. На телефоне с приложением Bybit обычно открывается в нём."""
+    return f"https://www.bybit.com/trade/usdt/{sym}"
+
+
+def chart_kb(sym):
+    return InlineKeyboardMarkup([[B("📈 График", url=chart_url(sym))]])
+
+
 def norm_symbol(s):
     s = s.strip().upper().replace("/", "").replace("-", "")
     if not s.endswith("USDT"):
@@ -152,8 +161,9 @@ class TgBot:
 
     async def _sender(self):
         while True:
-            text = await self.engine.outbox.get()
-            await self._send(text)
+            item = await self.engine.outbox.get()
+            text, sym = item if isinstance(item, tuple) else (item, None)
+            await self._send(text, chart_kb(sym) if sym else None)
             await asyncio.sleep(0.3)  # не упираться в лимиты Telegram при пачке сигналов
 
     async def _send(self, text, markup=None):
@@ -400,7 +410,8 @@ class TgBot:
                     f"до стопа {to_sl:.2f}% · до тейка {to_tp:.2f}%",
                 ]
                 rows.append([B(f"✋ Закрыть {t['symbol'].replace('USDT', '')} #{t['id']}",
-                               callback_data=f"close:{t['id']}")])
+                               callback_data=f"close:{t['id']}"),
+                             B("📈 График", url=chart_url(t["symbol"]))])
         else:
             lines.append("Открытых сделок нет.")
         closed = self.db.closed_trades(limit=10)
@@ -529,7 +540,8 @@ class TgBot:
             ctx.user_data["pending"] = ("walls", None)
             await self._reply(update, "🧱 Какая монета? Напиши, например, <code>SOL</code>")
             return
-        await self._reply(update, self.engine.walls_text(norm_symbol(ctx.args[0])))
+        sym = norm_symbol(ctx.args[0])
+        await self._reply(update, self.engine.walls_text(sym), chart_kb(sym) if sym in self.engine.feed.books else None)
 
     def analyze_texts(self, period):
         since = {"7d": time.time() - 7 * 86400, "1d": time.time() - 86400}.get(period, 0)
@@ -710,7 +722,7 @@ class TgBot:
             p = self.engine.price(t["symbol"]) if t else None
             if t and p:
                 closed = self.engine.paper.close_manual(tid, p)
-                await self._reply(update, self.engine._fmt_close(closed))
+                await self._reply(update, self.engine._fmt_close(closed), chart_kb(closed["symbol"]))
             await self._reply(update, *self.screen_trades(), edit=True)
         elif kind == "ask":
             if arg == "add":
@@ -748,7 +760,8 @@ class TgBot:
         if kind == "add":
             await self._add_coins(update, text.replace(",", " ").split())
         elif kind == "walls":
-            await self._reply(update, self.engine.walls_text(norm_symbol(text.split()[0])))
+            sym = norm_symbol(text.split()[0])
+            await self._reply(update, self.engine.walls_text(sym), chart_kb(sym) if sym in self.engine.feed.books else None)
         elif kind == "set":
             if await self._apply_set(update, arg, text):
                 grp = next(g for g, (_, keys) in GROUPS.items() if arg in keys)
