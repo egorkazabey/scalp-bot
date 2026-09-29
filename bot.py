@@ -13,55 +13,64 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, Con
                           MessageHandler, filters)
 
 from analysis import analyze
-from config import PARAMS, SIGNAL_TYPES, TYPE_NAMES
+from config import ENUMS, LABELS, PARAMS, SHORT_NAMES, SIGNAL_TYPES, TYPE_NAMES
 from engine import Engine, fdur, fp, fusd
 from paper import today_start
 
 log = logging.getLogger("bot")
 
 GROUPS = {
-    "coins": ("🪙 Монеты и стакан", ["coin_mode", "auto_top_n", "movers_n", "auto_min_turnover", "max_coins",
-                                    "refresh_min", "ob_depth", "min_book_usd"]),
-    "scale": ("📐 Автоподстройка порогов", ["auto_scale", "wall_share_pct", "liq_turnover_pct"]),
-    "walls": ("🧱 Плотности", ["breakout_mode", "min_wall_usd", "wall_mult", "wall_max_dist_pct", "max_walls_side", "min_wall_age_sec",
-                              "min_trust", "approach_pct"]),
-    "flow": ("📊 Объём и ликвидации", ["volume_mode", "vol_mult", "vol_min_move_pct", "vol_min_usd", "liq_usd", "liq_mode"]),
-    "risk": ("💼 Риск и бумажная торговля", ["paper_enabled", "start_balance", "size_mode", "risk_pct",
-                                            "margin_pct", "max_leverage",
-                                            "rr", "sl_buffer_pct", "default_sl_pct", "min_sl_pct", "stop_pause_min", "max_hold_min",
-                                            "max_open", "max_same_side", "daily_loss_pct", "fee_pct", "maker_fee_pct", "slippage_pct", "tp_through_pct"]),
+    "coins": ("🪙 Монеты", ["coin_mode", "auto_top_n", "movers_n", "auto_min_turnover", "max_coins",
+                           "refresh_min", "ob_depth", "min_book_usd"]),
+    "walls": ("🧱 Плотности", ["breakout_mode", "wall_mult", "wall_share_pct", "min_wall_usd", "wall_max_dist_pct",
+                              "max_walls_side", "min_wall_age_sec", "min_trust", "approach_pct"]),
+    "flow": ("📊 Объём и ликвидации", ["volume_mode", "vol_mult", "vol_min_move_pct", "vol_min_usd",
+                                      "liq_mode", "liq_usd", "liq_turnover_pct", "auto_scale"]),
+    "size": ("💼 Размер сделки", ["paper_enabled", "start_balance", "size_mode", "risk_pct", "margin_pct",
+                                 "max_leverage", "rr"]),
+    "protect": ("🛡 Защита", ["min_sl_pct", "sl_buffer_pct", "default_sl_pct", "max_hold_min", "max_open",
+                             "max_same_side", "stop_pause_min", "daily_loss_pct", "cooldown_sec",
+                             "btc_filter", "btc_filter_pct"]),
+    "fees": ("🧾 Комиссии", ["fee_pct", "maker_fee_pct", "slippage_pct", "tp_through_pct"]),
     "learn": ("🧠 Обучение", ["auto_pause", "pause_window", "pause_coin_window", "analyze_min"]),
-    "general": ("⚙️ Общее", ["cooldown_sec", "btc_filter", "btc_filter_pct"]),
 }
 FEED_KEYS = {"coin_mode", "auto_top_n", "movers_n", "auto_min_turnover", "max_coins", "ob_depth"}
-MODES = {
-    "manual": "свой список",
-    "auto": "топ по обороту",
-    "movers": "топ роста и падения за 24ч",
-    "mix": "свой список + оборот + рост/падение",
-}
+MODES = ENUMS["coin_mode"]
+MONEY_KEYS = {"auto_min_turnover", "min_book_usd", "min_wall_usd", "vol_min_usd", "liq_usd", "start_balance"}
 
-HELP = """<b>Команды</b>
-/menu - главное меню
-/status - состояние бота
-/coins - монеты · /add SOL ETH · /remove SOL
-/movers 5 - топ-5 роста и топ-5 падения за 24ч
-/mix - свой список + топ по обороту + рост/падение
-/auto 15 - топ-15 монет по обороту · /manual - свой список
-/walls SOL - текущие плотности по монете
-/signals - последние сигналы
-/stats - статистика · /trades - бумажные сделки
-/analyze - что работает, а что нет (по обстановке сигналов) · /analyze 7d
-/unpause - снять все автопаузы
-/settings - все настройки
-/set min_wall_usd 500k - изменить параметр
-/set BTC min_wall_usd 3m - параметр только для одной монеты
-/unset BTC [параметр] - убрать настройку монеты
-/pause · /resume - пауза сигналов
-/reset_paper - сбросить бумажный счёт
-/reset_settings - настройки по умолчанию
+HELP = """📖 <b>Команды</b>
 
-Числа можно писать как 500k, 2.5m, 0,3."""
+<b>Главное</b>
+/menu · меню с кнопками
+/status · состояние бота
+/pause · /resume · пауза и продолжение
+
+<b>Монеты</b>
+/coins · список монет
+/add SOL ETH · добавить свои
+/remove SOL · убрать
+/mix · свои + топ по обороту + рост и падение
+/movers 5 · топ-5 роста и топ-5 падения за сутки
+/auto 15 · топ-15 по обороту
+/manual · только свои
+/walls SOL · плотности по монете
+
+<b>Результаты</b>
+/stats · статистика
+/trades · бумажные сделки
+/signals · последние сигналы
+/analyze · что работает, а что нет
+/unpause · снять автопаузы
+
+<b>Настройки</b>
+/settings · все настройки кнопками
+/set min_wall_usd 500k · изменить параметр
+/set BTC min_wall_usd 3m · только для одной монеты
+/unset BTC · убрать настройки монеты
+/reset_settings · всё по умолчанию
+/reset_paper · обнулить бумажный счёт
+
+<i>Числа можно писать как 500k, 2.5m или 0,3</i>"""
 
 
 def norm_symbol(s):
@@ -71,10 +80,20 @@ def norm_symbol(s):
     return s
 
 
+def coin(sym):
+    return sym.replace("USDT", "")
+
+
+def money(v):
+    return f"{'+' if v >= 0 else '-'}${abs(v):,.2f}".replace(",", " ")
+
+
 def fval(key, v):
     if isinstance(v, bool):
-        return "вкл" if v else "выкл"
-    if key.endswith("_usd") or key in ("auto_min_turnover",):
+        return "✅ вкл" if v else "⬜ выкл"
+    if key in ENUMS:
+        return ENUMS[key].get(v, str(v))
+    if key in MONEY_KEYS:
         return fusd(v)
     if isinstance(v, float):
         return f"{v:g}"
@@ -123,7 +142,7 @@ class TgBot:
         except TelegramError as e:
             log.warning("set_my_commands failed: %s", e)
         if self.s["owner_id"]:
-            await self._send("🚀 Бот запущен. /menu")
+            await self._send("🚀 <b>Бот запущен</b>\nМеню: /menu")
 
     async def _post_shutdown(self, app):
         await self.engine.stop()
@@ -161,7 +180,7 @@ class TgBot:
                 await fn(update, ctx)
             except Exception as e:
                 log.exception("handler error")
-                await self._reply(update, f"⚠️ Ошибка: {html.escape(str(e))}")
+                await self._reply(update, f"⚠️ Что-то пошло не так: {html.escape(str(e))}")
         return wrapper
 
     async def _reply(self, update, text, markup=None, edit=False):
@@ -195,65 +214,77 @@ class TgBot:
         prices = e.prices()
         up = time.time() - e.started_at
         last = time.time() - f.last_msg if f.last_msg else None
+        bal = e.paper.balance()
+        start = self.s.get("start_balance")
+        state = "⏸ <b>Пауза</b>, новые сигналы не ищутся" if self.s["paused"] else "✅ <b>Бот работает</b>"
+        data = "нет данных" if last is None else ("данные идут" if last < 10 else f"данные {last:.0f}с назад ⚠️")
+        mode = ENUMS["coin_mode"].get(self.s.get("coin_mode"), "")
+        coins = ", ".join(coin(x) for x in e.symbols[:12]) + (f" и ещё {len(e.symbols) - 12}"
+                                                             if len(e.symbols) > 12 else "")
+        unreal = e.paper.unrealized(prices)
         lines = [
-            "⏸ <b>На паузе</b>" if self.s["paused"] else "✅ <b>Работает</b>",
-            f"Аптайм: {fdur(up)} · соединений с Bybit: {f.connected}",
-            f"Данные: {'нет' if last is None else f'{last:.0f}с назад'}",
-            f"Монеты ({self.s.get('coin_mode')}): {', '.join(s.replace('USDT', '') for s in e.symbols)}",
+            f"{state} · {fdur(up)}",
+            f"Bybit: {f.connected} соед. · {data}",
             "",
-            f"💰 Баланс: <b>{e.paper.balance():.2f}$</b> · за сегодня {e.paper.day_pnl():+.2f}$",
-            f"Открыто сделок: {len(e.paper.open)} · нереализ. {e.paper.unrealized(prices):+.2f}$",
+            f"🪙 <b>Монеты</b> ({mode}): {len(e.symbols)}",
+            coins or "список пуст",
+            "",
+            f"💰 <b>Баланс {money(bal)[1:] if bal >= 0 else money(bal)}</b>"
+            + (f"  ({(bal / start - 1) * 100:+.1f}%)" if start else ""),
+            f"Сегодня {money(e.paper.day_pnl())}",
+            f"Открыто сделок: {len(e.paper.open)}" + (f" ({money(unreal)})" if e.paper.open else ""),
         ]
+        warn = []
         if self.s["auto_paused"]:
             names = [k.split(":", 1)[1] for k in self.s["auto_paused"]]
-            lines.append("🧠 На автопаузе: " + ", ".join(TYPE_NAMES.get(n, n) for n in names))
+            warn.append("🧠 На автопаузе: " + ", ".join(TYPE_NAMES.get(n, coin(n)) for n in names))
         if e.paper.daily_stop_hit():
-            lines.append("🛑 Дневной лимит убытка достигнут, новые сделки не открываются")
+            warn.append("🛑 Дневной лимит убытка: новые сделки сегодня не открываются")
         if e.last_error:
-            lines.append(f"⚠️ {html.escape(e.last_error)}")
+            warn.append(f"⚠️ {html.escape(e.last_error)}")
+        if warn:
+            lines += [""] + warn
         return "\n".join(lines)
 
     def screen_coins(self):
         mode = self.s.get("coin_mode")
         e = self.engine
-        text = [f"<b>Монеты</b> · режим <b>{mode}</b>: {MODES.get(mode, mode)}"]
+        text = [f"🪙 <b>Монеты</b> · {MODES.get(mode, mode)}"]
         if mode != "manual":
-            text.append(f"Только монеты с оборотом от {fusd(self.s.get('auto_min_turnover'))} за 24ч, "
-                        f"список обновляется каждые {self.s.get('refresh_min')} мин.")
-        text.append("")
-        for s in e.symbols:
-            ch = e.coin_change(s)
+            text.append(f"<i>Оборот от {fusd(self.s.get('auto_min_turnover'))} в сутки, "
+                        f"список обновляется каждые {self.s.get('refresh_min')} мин</i>")
+        rows_t = []
+        for x in e.symbols:
+            ch = e.coin_change(x)
             ch_txt = f"{ch:+.1f}%" if ch is not None else ""
-            tag = e.coin_tags.get(s, "")
-            tag = "" if tag.startswith(("📈", "📉")) else f" · {tag}"
-            if e.thin(s):
-                tag += " · ⚠️ тонкий стакан"
-            text.append(f"<code>{s.replace('USDT', ''):<10}</code> {ch_txt}{tag}")
-        if not e.symbols:
-            text.append("список пуст")
+            tag = e.coin_tags.get(x, "")
+            tag = "рост" if tag.startswith("📈") else "падение" if tag.startswith("📉") else tag
+            if e.thin(x):
+                tag += " ⚠️тонкий"
+            rows_t.append(f"{coin(x)[:10]:<10} {ch_txt:>7}  {tag}")
+        text.append("<pre>" + ("\n".join(rows_t) if rows_t else "список пуст") + "</pre>")
         ov = self.s["overrides"]
         if ov:
-            text.append("\n<b>Настройки по монетам:</b>")
-            for sym, d in ov.items():
-                text.append(f"{sym}: " + ", ".join(f"{k}={fval(k, v)}" for k, v in d.items()))
+            text.append("<b>Свои настройки монет</b>")
+            for x, d in ov.items():
+                text.append(f"{coin(x)}: " + ", ".join(f"{LABELS.get(k, k)} {fval(k, v)}" for k, v in d.items()))
         rows = []
         if mode in ("manual", "mix"):
-            text.append("\n<i>Кнопки «✖» ниже убирают монету из твоего списка.</i>")
-            btns = [B(f"✖ {s.replace('USDT', '')}", callback_data=f"rm:{s}") for s in self.s["coins"]]
-            rows += [btns[i:i + 3] for i in range(0, len(btns), 3)]
-            rows.append([B("➕ Добавить свою монету", callback_data="ask:add")])
+            text.append("<i>✖ убирает монету из твоего списка</i>")
+            btns = [B(f"✖ {coin(x)}", callback_data=f"rm:{x}") for x in self.s["coins"]]
+            rows += [btns[i:i + 4] for i in range(0, len(btns), 4)]
+            rows.append([B("➕ Добавить монету", callback_data="ask:add")])
         rows.append([B(("● " if mode == m else "") + label, callback_data=f"mode:{m}")
                      for m, label in (("manual", "Свои"), ("auto", "Объём"), ("movers", "±24ч"),
                                       ("mix", "Всё"))])
-        rows.append([B("🔄 Обновить", callback_data="scr:coins")])
-        rows.append([B("🧱 Плотности по монете", callback_data="ask:walls")])
+        rows.append([B("🧱 Плотности монеты", callback_data="ask:walls"), B("🔄 Обновить", callback_data="scr:coins")])
         rows.append(self.BACK)
         return "\n".join(text), InlineKeyboardMarkup(rows)
 
     def screen_sigs(self):
-        text = ("<b>Типы сигналов</b>\n"
-                "Левая кнопка: искать сигнал или нет.\n"
-                "🔔/🔕: присылать уведомление или только тихо записывать в статистику и бумажный счёт.")
+        text = ("🔔 <b>Типы сигналов</b>\n\n"
+                "✅ / ⬜ · искать сигнал или нет\n"
+                "🔔 / 🔕 · присылать уведомление или только тихо считать статистику и вести бумажный счёт")
         rows = []
         for k, name in SIGNAL_TYPES.items():
             on = self.s["signals_on"][k]
@@ -264,19 +295,21 @@ class TgBot:
         return text, InlineKeyboardMarkup(rows)
 
     def screen_settings(self):
-        rows = [[B(title, callback_data=f"grp:{g}")] for g, (title, _) in GROUPS.items()]
-        rows.append([B("♻️ Сбросить по умолчанию", callback_data="ask:reset_settings")])
+        titles = [B(title, callback_data=f"grp:{g}") for g, (title, _) in GROUPS.items()]
+        rows = [titles[i:i + 2] for i in range(0, len(titles), 2)]
+        rows.append([B("♻️ Всё по умолчанию", callback_data="ask:reset_settings")])
         rows.append(self.BACK)
-        return "<b>Настройки</b>\nВыбери раздел. Нажми на параметр и отправь новое значение.", InlineKeyboardMarkup(rows)
+        return "⚙️ <b>Настройки</b>\nВыбери раздел.", InlineKeyboardMarkup(rows)
 
     def screen_group(self, g):
         title, keys = GROUPS[g]
-        lines = [f"<b>{title}</b>"]
+        lines = [f"<b>{title}</b>", ""]
         rows = []
         for k in keys:
             v = self.s.get(k)
-            lines.append(f"• <code>{k}</code> = <b>{fval(k, v)}</b>\n   {PARAMS[k][2]}")
-            rows.append([B(f"{k}: {fval(k, v)}", callback_data=f"set:{k}")])
+            lines.append(f"<b>{LABELS[k]}</b> · {fval(k, v)}\n<i>{PARAMS[k][2]}</i>\n")
+            rows.append([B(f"{LABELS[k]}: {fval(k, v)}", callback_data=f"set:{k}")])
+        lines.append("👇 Нажми на параметр: варианты переключаются сразу, число нужно отправить сообщением.")
         rows.append([B("⬅️ Настройки", callback_data="scr:settings")])
         return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -284,7 +317,7 @@ class TgBot:
         since = {"today": today_start(), "7d": time.time() - 7 * 86400, "all": 0}[period]
         pname = {"today": "сегодня", "7d": "7 дней", "all": "всё время"}[period]
         tr = self.db.closed_trades(since=since)
-        lines = [f"<b>📈 Статистика за {pname}</b>", "", "<b>Бумажные сделки</b>"]
+        lines = [f"📈 <b>Статистика · {pname}</b>", "", "<b>Бумажные сделки</b>"]
         if tr:
             wins = [t["pnl"] for t in tr if t["pnl"] > 0]
             losses = [t["pnl"] for t in tr if t["pnl"] <= 0]
@@ -292,11 +325,12 @@ class TgBot:
             fees = sum(t["fees"] for t in tr)
             pf = sum(wins) / abs(sum(losses)) if losses and sum(losses) != 0 else float("inf")
             lines += [
-                f"Сделок: {len(tr)} · винрейт {len(wins) / len(tr) * 100:.0f}%",
-                f"PnL: <b>{total:+.2f}$</b> (из них комиссии {fees:.2f}$)",
-                f"Средняя прибыль {sum(wins) / len(wins) if wins else 0:+.2f}$ · средний убыток "
-                f"{sum(losses) / len(losses) if losses else 0:+.2f}$",
-                f"Профит-фактор: {'∞' if pf == float('inf') else f'{pf:.2f}'}",
+                f"Сделок {len(tr)} · в плюс {len(wins) / len(tr) * 100:.0f}%",
+                f"Итог <b>{money(total)}</b>  (комиссии ${fees:.2f})",
+                f"Средний плюс {money(sum(wins) / len(wins)) if wins else '-'} · "
+                f"средний минус {money(sum(losses) / len(losses)) if losses else '-'}",
+                f"Профит-фактор <b>{'∞' if pf == float('inf') else f'{pf:.2f}'}</b>  "
+                "<i>(больше 1 значит в плюсе)</i>",
             ]
             by = {}
             for t in tr:
@@ -304,22 +338,25 @@ class TgBot:
                 d[0] += 1
                 d[1] += t["pnl"] > 0
                 d[2] += t["pnl"]
-            for k, (n, w, p) in by.items():
-                lines.append(f"  {TYPE_NAMES.get(k, k)}: {n} сд., {w / n * 100:.0f}% плюс, {p:+.2f}$")
+            table = [f"{'Тип':<11} {'Сд.':>3} {'Плюс':>5} {'Итог $':>8}"]
+            for k, (n, w, p) in sorted(by.items(), key=lambda kv: -kv[1][0]):
+                table.append(f"{SHORT_NAMES.get(k, k)[:11]:<11} {n:>3} {w / n * 100:>4.0f}% {p:>+8.2f}")
+            lines.append("<pre>" + "\n".join(table) + "</pre>")
         else:
             lines.append("Закрытых сделок пока нет.")
-        lines += ["", "<b>Сигналы: средний ход цены в сторону сигнала</b>"]
+        lines += ["", "<b>Сигналы: ход цены в их сторону</b>"]
         st = self.db.signal_stats(since=since)
         if st:
-            for k, d in st.items():
-                def avg(a):
-                    return f"{sum(a) / len(a):+.2f}%" if a else "-"
-                pos5 = f"{sum(1 for x in d['m5'] if x > 0) / len(d['m5']) * 100:.0f}%" if d["m5"] else "-"
-                lines.append(f"{TYPE_NAMES.get(k, k)} ({d['n']}): 1м {avg(d['m1'])} · 5м {avg(d['m5'])} · "
-                             f"15м {avg(d['m15'])} · в плюс через 5м: {pos5}")
+            def avg(a):
+                return f"{sum(a) / len(a):+.2f}" if a else "   -"
+            table = [f"{'Тип':<11} {'N':>3} {'1м':>6} {'5м':>6} {'15м':>6}"]
+            for k, d in sorted(st.items(), key=lambda kv: -kv[1]["n"]):
+                table.append(f"{SHORT_NAMES.get(k, k)[:11]:<11} {d['n']:>3} {avg(d['m1']):>6} "
+                             f"{avg(d['m5']):>6} {avg(d['m15']):>6}")
+            lines.append("<pre>" + "\n".join(table) + "</pre>")
+            lines.append("<i>Средний ход в %. Вход и выход стоят ~0.11%: если ход меньше, сигнал не окупается.</i>")
         else:
             lines.append("Сигналов пока нет.")
-        lines.append("\n<i>Комиссия за круг ~0.11%: если средний ход меньше, сигнал не окупается.</i>")
         return "\n".join(lines)
 
     def kb_stats(self):
@@ -380,17 +417,21 @@ class TgBot:
     def text_last(self):
         rows = self.db.recent_signals(15)
         if not rows:
-            return "Сигналов пока не было."
-        lines = ["<b>🧾 Последние сигналы</b>"]
+            return "🧾 Сигналов пока не было."
+        table = [f"{'Время':<5} {'Монета':<8} {'Тип':<11} {'':1} {'5 мин':>6}"]
         for r in rows:
-            icon = "🟢" if r["side"] == "LONG" else "🔴"
-            res = ""
+            res = "   ..."
             if r["p5"]:
                 mv = (r["p5"] / r["price"] - 1) * 100 * (1 if r["side"] == "LONG" else -1)
-                res = f" · 5м: {mv:+.2f}%"
-            t = time.strftime("%d.%m %H:%M", time.localtime(r["ts"]))
-            lines.append(f"{icon} {t} {r['symbol']} {TYPE_NAMES.get(r['type'], r['type'])} @ {fp(r['price'])}{res}")
-        return "\n".join(lines)
+                res = f"{mv:+.2f}%"
+            elif r["result"] in ("lost",):
+                res = "     -"
+            t = time.strftime("%H:%M", time.localtime(r["ts"]))
+            side = "▲" if r["side"] == "LONG" else "▼"
+            table.append(f"{t:<5} {coin(r['symbol'])[:8]:<8} {SHORT_NAMES.get(r['type'], r['type'])[:11]:<11} "
+                         f"{side} {res:>6}")
+        return ("🧾 <b>Последние сигналы</b>\n<pre>" + "\n".join(table) + "</pre>\n"
+                "<i>▲ лонг, ▼ шорт. Справа: куда пошла цена через 5 минут, в сторону сигнала</i>")
 
     # ---------- команды ----------
     async def cmd_start(self, update: Update, ctx):
@@ -398,9 +439,9 @@ class TgBot:
         if not self.s["owner_id"]:
             self.s["owner_id"] = uid
             log.info("Owner set to %s", uid)
-            await update.message.reply_text(f"👋 Ты владелец бота (id {uid}). Остальным доступ закрыт.")
+            await update.message.reply_text(f"👋 Привет! Теперь ты владелец бота (id {uid}), остальным доступ закрыт.")
         if uid != self.s["owner_id"]:
-            await update.message.reply_text("Это приватный бот.")
+            await update.message.reply_text("🔒 Это приватный бот.")
             return
         await self.cmd_menu(update, ctx)
 
@@ -434,32 +475,32 @@ class TgBot:
                 await self.engine.restart_feed()
         msg = []
         if good:
-            msg.append("✅ Добавил: " + ", ".join(good))
+            msg.append("✅ Добавил: " + ", ".join(coin(x) for x in good))
         if bad:
-            msg.append("❌ Нет на Bybit фьючерсах: " + ", ".join(bad))
+            msg.append("❌ Нет на фьючерсах Bybit: " + ", ".join(coin(x) for x in bad))
         if not msg:
-            msg.append("Уже в списке.")
+            msg.append("Эти монеты уже в списке.")
         if self.s.get("coin_mode") in ("auto", "movers"):
-            msg.append("ℹ️ Сейчас авто-режим, свои монеты заработают в /manual или /mix")
+            msg.append("ℹ️ Сейчас бот сам выбирает монеты. Твой список работает в режимах «Свои» и «Всё»: /manual или /mix")
         await self._reply(update, "\n".join(msg))
 
     async def cmd_add(self, update, ctx):
         if not ctx.args:
             ctx.user_data["pending"] = ("add", None)
-            await self._reply(update, "Напиши монеты через пробел, например: <code>SOL PEPE ARB</code>")
+            await self._reply(update, "➕ Напиши монеты через пробел, например: <code>SOL PEPE ARB</code>")
             return
         await self._add_coins(update, ctx.args)
 
     async def cmd_remove(self, update, ctx):
         if not ctx.args:
-            await self._reply(update, "Формат: <code>/remove PEPE</code> или кнопки в /coins")
+            await self._reply(update, "Напиши так: <code>/remove PEPE</code>. Или нажми ✖ у монеты в /coins")
             return
         syms = [norm_symbol(n) for n in ctx.args]
         syms += ["1000" + s for s in syms]
         self.s["coins"] = [c for c in self.s["coins"] if c not in syms]
         if self.s.get("coin_mode") in ("manual", "mix"):
             await self.engine.restart_feed()
-        await self._reply(update, "Готово. Сейчас: " + ", ".join(self.s["coins"]))
+        await self._reply(update, "✅ Убрал. Твой список: " + (", ".join(coin(x) for x in self.s["coins"]) or "пуст"))
 
     async def _set_mode(self, update, mode, n_key=None, n=None):
         if n_key and n:
@@ -483,7 +524,7 @@ class TgBot:
     async def cmd_walls(self, update, ctx):
         if not ctx.args:
             ctx.user_data["pending"] = ("walls", None)
-            await self._reply(update, "Какая монета? Например <code>SOL</code>")
+            await self._reply(update, "🧱 Какая монета? Напиши, например, <code>SOL</code>")
             return
         await self._reply(update, self.engine.walls_text(norm_symbol(ctx.args[0])))
 
@@ -493,11 +534,11 @@ class TgBot:
         texts = analyze(self.db.results(since=since), self.s.get("analyze_min"), title)
         ap = self.s["auto_paused"]
         if ap:
-            lines = ["\n<b>На автопаузе</b> (сигналы пишутся и проверяются виртуально, без сделок):"]
+            lines = ["\n\n⏸ <b>На автопаузе</b>\n<i>без сделок и уведомлений, сигналы проверяются виртуально</i>"]
             for k, v in ap.items():
                 kind, name = k.split(":", 1)
                 what = TYPE_NAMES.get(name, name) if kind == "type" else name
-                lines.append(f"• {what}: {v['why']} (с {time.strftime('%d.%m %H:%M', time.localtime(v['since']))})")
+                lines.append(f"• <b>{what}</b> с {time.strftime('%H:%M %d.%m', time.localtime(v['since']))}\n    {v['why']}")
             texts[0] += "\n".join(lines)
         return texts
 
@@ -534,23 +575,27 @@ class TgBot:
     async def cmd_settings(self, update, ctx):
         await self._reply(update, *self.screen_settings())
 
-    async def _apply_set(self, update, key, value, symbol=None):
+    async def _apply_set(self, update, key, value, symbol=None, quiet=False):
         if key not in PARAMS:
-            await self._reply(update, f"Нет параметра <code>{html.escape(key)}</code>. Список: /settings")
-            return
+            await self._reply(update, f"❓ Нет такого параметра: <code>{html.escape(key)}</code>. "
+                                      "Все параметры: /settings")
+            return False
         if symbol and key in FEED_KEYS:
-            await self._reply(update, "Этот параметр общий, для отдельной монеты его задать нельзя.")
-            return
+            await self._reply(update, "Этот параметр общий для всех монет, для одной монеты его не задать.")
+            return False
         try:
             val = self.s.set(key, value, symbol=symbol)
         except ValueError as e:
-            await self._reply(update, f"❌ Неверное значение: {html.escape(str(e))}")
-            return
-        where = f" для {symbol}" if symbol else ""
-        await self._reply(update, f"✅ <code>{key}</code>{where} = <b>{fval(key, val)}</b>")
+            await self._reply(update, f"❌ Не подходит: {html.escape(str(e))}")
+            return False
+        if not quiet:
+            where = f" для {coin(symbol)}" if symbol else ""
+            await self._reply(update, f"✅ <b>{LABELS[key]}</b>{where}: {fval(key, val)}")
         if key in FEED_KEYS:
             await self.engine.restart_feed()
-            await self._reply(update, "🔄 Перезапустил поток данных: " + ", ".join(self.engine.symbols))
+            if not quiet:
+                await self._reply(update, f"🔄 Переподключился к Bybit, монет: {len(self.engine.symbols)}")
+        return True
 
     async def cmd_set(self, update, ctx):
         a = ctx.args
@@ -559,31 +604,34 @@ class TgBot:
         elif len(a) == 3:
             await self._apply_set(update, a[1], a[2], symbol=norm_symbol(a[0]))
         else:
-            await self._reply(update, "Формат: <code>/set параметр значение</code> или "
+            await self._reply(update, "Напиши так: <code>/set параметр значение</code> или "
                                       "<code>/set BTC параметр значение</code>")
 
     async def cmd_unset(self, update, ctx):
         if not ctx.args:
-            await self._reply(update, "Формат: <code>/unset BTC</code> или <code>/unset BTC min_wall_usd</code>")
+            await self._reply(update, "Напиши так: <code>/unset BTC</code> или <code>/unset BTC min_wall_usd</code>")
             return
         sym = norm_symbol(ctx.args[0])
         self.s.clear_override(sym, ctx.args[1] if len(ctx.args) > 1 else None)
-        await self._reply(update, f"✅ Убрал настройки {sym}")
+        await self._reply(update, f"✅ У {coin(sym)} снова общие настройки")
 
     async def cmd_pause(self, update, ctx):
         self.s["paused"] = True
-        await self._reply(update, "⏸ Пауза. Новые сигналы не ищутся, открытые бумажные сделки ведутся дальше.")
+        await self._reply(update, "⏸ <b>Пауза</b>\nНовые сигналы не ищутся. Открытые сделки доводятся до стопа или тейка.\n"
+                                  "Продолжить: /resume")
 
     async def cmd_resume(self, update, ctx):
         self.s["paused"] = False
-        await self._reply(update, "▶️ Работаю.")
+        await self._reply(update, "▶️ <b>Работаю</b>, ищу сигналы.")
 
     async def cmd_reset_paper(self, update, ctx):
-        await self._reply(update, "Сбросить бумажный счёт и историю сделок?", InlineKeyboardMarkup(
+        await self._reply(update, f"♻️ <b>Обнулить бумажный счёт?</b>\nБаланс вернётся к {fusd(self.s.get('start_balance'))}, "
+                                  "история сделок удалится. Статистика сигналов останется.", InlineKeyboardMarkup(
             [[B("Да, сбросить", callback_data="do:reset_paper"), B("Отмена", callback_data="scr:main")]]))
 
     async def cmd_reset_settings(self, update, ctx):
-        await self._reply(update, "Вернуть все настройки по умолчанию?", InlineKeyboardMarkup(
+        await self._reply(update, "♻️ <b>Вернуть все настройки по умолчанию?</b>\nСвои настройки монет тоже сбросятся.",
+                          InlineKeyboardMarkup(
             [[B("Да", callback_data="do:reset_settings"), B("Отмена", callback_data="scr:main")]]))
 
     # ---------- кнопки ----------
@@ -636,14 +684,22 @@ class TgBot:
             await self.engine.restart_feed()
             await self._reply(update, *self.screen_coins(), edit=True)
         elif kind == "set":
-            if PARAMS[arg][1] is bool:
-                await self._apply_set(update, arg, "off" if self.s.get(arg) else "on")
-                grp = next(g for g, (_, keys) in GROUPS.items() if arg in keys)
-                await self._reply(update, *self.screen_group(grp))
+            grp = next(g for g, (_, keys) in GROUPS.items() if arg in keys)
+            cur = self.s.get(arg)
+            if PARAMS[arg][1] is bool or arg in ENUMS:
+                # переключаем сразу, без ввода
+                if PARAMS[arg][1] is bool:
+                    new = "off" if cur else "on"
+                else:
+                    opts = list(ENUMS[arg])
+                    new = opts[(opts.index(cur) + 1) % len(opts)] if cur in opts else opts[0]
+                await self._apply_set(update, arg, new, quiet=True)
+                await self._reply(update, *self.screen_group(grp), edit=True)
             else:
                 ctx.user_data["pending"] = ("set", arg)
-                await self._reply(update, f"<code>{arg}</code> сейчас <b>{fval(arg, self.s.get(arg))}</b>\n"
-                                          f"{PARAMS[arg][2]}\n\nОтправь новое значение:")
+                ex = "500k или 2m" if arg in MONEY_KEYS else "0.5" if isinstance(cur, float) else "30"
+                await self._reply(update, f"✏️ <b>{LABELS[arg]}</b>\nСейчас: <b>{fval(arg, cur)}</b>\n"
+                                          f"<i>{PARAMS[arg][2]}</i>\n\nОтправь новое значение, например <code>{ex}</code>")
         elif kind == "close":
             tid = int(arg)
             t = self.engine.paper.open.get(tid)
@@ -658,7 +714,7 @@ class TgBot:
                 await self._reply(update, "Напиши монеты через пробел, например: <code>SOL PEPE ARB</code>")
             elif arg == "walls":
                 ctx.user_data["pending"] = ("walls", None)
-                await self._reply(update, "Какая монета? Например <code>SOL</code>")
+                await self._reply(update, "🧱 Какая монета? Напиши, например, <code>SOL</code>")
             elif arg == "reset_paper":
                 await self.cmd_reset_paper(update, ctx)
             elif arg == "reset_settings":
@@ -666,7 +722,7 @@ class TgBot:
         elif kind == "do":
             if arg == "reset_paper":
                 self.engine.paper.reset()
-                await self._reply(update, f"♻️ Счёт сброшен. Баланс {self.engine.paper.balance():.2f}$", edit=True)
+                await self._reply(update, f"♻️ Счёт обнулён. Баланс {fusd(self.engine.paper.balance())}", edit=True)
             elif arg == "unpause":
                 now = time.time()
                 for k in self.s["auto_paused"]:
@@ -676,13 +732,13 @@ class TgBot:
             elif arg == "reset_settings":
                 self.s.reset_params()
                 await self.engine.restart_feed()
-                await self._reply(update, "♻️ Настройки сброшены.", edit=True)
+                await self._reply(update, "♻️ Все настройки по умолчанию.", edit=True)
 
     async def on_text(self, update: Update, ctx):
         pending = ctx.user_data.pop("pending", None)
         text = update.message.text.strip()
         if not pending:
-            await self._reply(update, "Не понял. Открой /menu или /help")
+            await self._reply(update, "🤔 Не понял. Меню: /menu, все команды: /help")
             return
         kind, arg = pending
         if kind == "add":
@@ -690,7 +746,11 @@ class TgBot:
         elif kind == "walls":
             await self._reply(update, self.engine.walls_text(norm_symbol(text.split()[0])))
         elif kind == "set":
-            await self._apply_set(update, arg, text)
+            if await self._apply_set(update, arg, text):
+                grp = next(g for g, (_, keys) in GROUPS.items() if arg in keys)
+                await self._reply(update, *self.screen_group(grp))
+            else:
+                ctx.user_data["pending"] = ("set", arg)  # даём попробовать ещё раз
 
     def run(self):
         self.app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)

@@ -39,9 +39,9 @@ def fusd(v):
     a = abs(v)
     sign = "-" if v < 0 else ""
     if a >= 1e9:
-        return f"{sign}${a / 1e9:.2f}B"
+        return f"{sign}${a / 1e9:.2f}".rstrip("0").rstrip(".") + "B"
     if a >= 1e6:
-        return f"{sign}${a / 1e6:.2f}M"
+        return f"{sign}${a / 1e6:.2f}".rstrip("0").rstrip(".") + "M"
     if a >= 1e3:
         return f"{sign}${a / 1e3:.0f}K" if a >= 1e4 else f"{sign}${a:,.0f}".replace(",", " ")
     if a >= 100:
@@ -202,13 +202,13 @@ class Engine:
                 new = await self.resolve_symbols()
                 if set(new) != old:
                     await self.restart_feed(new)
-                    added = [f"{s.replace('USDT', '')} ({self.coin_tags.get(s, '')})" for s in new if s not in old]
+                    added = [f"{s.replace('USDT', '')} {self.coin_tags.get(s, '')}".strip() for s in new if s not in old]
                     removed = [s.replace("USDT", "") for s in old if s not in new]
-                    msg = ["🔄 <b>Обновил список монет</b>"]
+                    msg = [f"🔄 <b>Список монет обновлён</b> · теперь {len(new)}"]
                     if added:
-                        msg.append("Добавил: " + ", ".join(added))
+                        msg.append("➕ " + ", ".join(added))
                     if removed:
-                        msg.append("Убрал: " + ", ".join(removed))
+                        msg.append("➖ " + ", ".join(removed))
                     self.say("\n".join(msg))
             except Exception:
                 log.exception("auto refresh")
@@ -495,7 +495,7 @@ class Engine:
         checks = (
             (f"type:{typ}", TYPE_NAMES.get(typ, typ), self.s.get("pause_window"),
              dict(typ=typ), -0.05, 0.8),
-            (f"coin:{sym}", sym, self.s.get("pause_coin_window"), dict(symbol=sym), -0.15, 0.7),
+            (f"coin:{sym}", sym.replace("USDT", ""), self.s.get("pause_coin_window"), dict(symbol=sym), -0.15, 0.7),
         )
         for key, name, win, flt, bad_avg, bad_pf in checks:
             if key not in ap:
@@ -505,8 +505,11 @@ class Engine:
                     why = f"последние {n} сигналов: в среднем {avg:+.2f}% на сделку, профит-фактор {pf:.2f}"
                     ap[key] = {"since": time.time(), "why": why}
                     changed = True
-                    self.say(f"🧠 <b>Автопауза: {name}</b>\n{why}.\nСигналы продолжаю записывать и "
-                             f"проверять виртуально, верну автоматически, когда результат станет плюсовым.")
+                    self.say(f"🧠 <b>Автопауза: {name}</b>\n"
+                             f"Последние {n} сигналов в минусе: в среднем {avg:+.2f}% на сделку, "
+                             f"профит-фактор {pf:.2f}.\n\n"
+                             "Сделок и уведомлений по ним не будет. Сигналы продолжаю проверять "
+                             "виртуально и верну сам, когда станет плюс. Вернуть сейчас: /unpause")
             else:
                 # возвращаем, когда свежая половина окна (собранная уже во время паузы) в плюсе
                 half = max(5, win // 2)
@@ -518,8 +521,9 @@ class Engine:
                     del ap[key]
                     self.s["pause_reset"][key] = time.time()
                     changed = True
-                    self.say(f"🧠 <b>Снял автопаузу: {name}</b>\nЗа время паузы последние {n} сигналов: "
-                             f"в среднем {avg:+.2f}%, профит-фактор {pf:.2f}.")
+                    self.say(f"🧠 <b>Автопауза снята: {name}</b>\n"
+                             f"Пока была пауза, последние {n} сигналов дали в среднем {avg:+.2f}% "
+                             f"на сделку, профит-фактор {pf:.2f}. Снова торгую.")
         if changed:
             self.s.save()
 
@@ -627,67 +631,76 @@ class Engine:
         last = self.feed.last_msg
         if last and now - last > 90:
             if not self._stale_alerted:
-                self.say("⚠️ Нет данных с Bybit больше 90 сек, переподключаюсь...")
+                self.say("⚠️ <b>Bybit молчит больше 90 секунд</b>\nПереподключаюсь, напишу, когда данные пойдут.")
                 self._stale_alerted = True
             await self.restart_feed()
             self.feed.last_msg = now  # даём время на подключение
         elif self._stale_alerted and last and now - last < 10:
             self._stale_alerted = False
-            self.say("✅ Данные с Bybit снова идут")
+            self.say("✅ <b>Связь с Bybit восстановлена</b>")
 
     # ---------- для команд бота ----------
     def walls_text(self, sym):
         tr = self.walls.get(sym)
         book = self.feed.books.get(sym)
+        name = sym.replace("USDT", "")
         if sym not in self.feed.books:
-            return (f"{sym} сейчас не отслеживается.\n"
-                    f"Добавь в свой список: <code>/add {sym.replace('USDT', '')}</code> "
-                    "(в режиме manual или mix)")
+            return (f"🧱 <b>{name}</b> сейчас не отслеживается.\n"
+                    f"Добавь её: <code>/add {name}</code> (работает в режимах «Свои» и «Всё»)")
         if not tr or not book or not book.bids or not book.asks:
-            return f"По {sym} стакан ещё загружается, попробуй через пару секунд."
+            return f"🧱 По {name} стакан ещё загружается, попробуй через пару секунд."
         now = time.time()
         mid = book.mid()
-        ws = sorted(tr.walls.values(), key=lambda w: -w.price)
-        if sym in self.s["overrides"] and "min_wall_usd" in self.s["overrides"][sym]:
-            how = f"своя настройка монеты, мин. {fusd(self.eff('min_wall_usd', sym))}"
-        elif self.s.get("auto_scale"):
-            how = (f"авто: {self.s.get('wall_share_pct'):g}% заявок стороны или "
-                   f"{self.eff('wall_mult', sym):g}x средний уровень")
-        else:
-            how = f"общая настройка, мин. {fusd(self.eff('min_wall_usd', sym))}"
         max_dist = self.eff("wall_max_dist_pct", sym) / 100
-        lines = [f"<b>{sym}</b> · цена {fp(mid)}"]
-        thr = " · ".join(f"{side} {fusd(tr.thr[side])}" for side in ("bid", "ask") if side in tr.thr)
-        lines.append(f"Порог плотности: {thr or '-'}\n<i>({how})</i>")
-        if ws:
-            lines.append("")
-            for w in ws:
-                dist = (w.price / mid - 1) * 100
-                icon = "🟥" if w.side == "ask" else "🟩"
-                lines.append(f"{icon} <code>{fp(w.price)}</code> ({dist:+.2f}%) {fusd(w.usd)} · "
-                             f"x{w.ratio:.0f} к соседям · {fdur(w.age(now))} · доверие {w.trust(now)}")
+        lines = [f"🧱 <b>{name}</b> · цена <code>{fp(mid)}</code>", ""]
+
+        def row(kind, px, usd, extra=""):
+            return f"{kind:<4} {fp(px):>10} {(px / mid - 1) * 100:+6.2f}% {fusd(usd):>7}{extra}"
+
+        ws = tr.walls.values()
+        asks = sorted((w for w in ws if w.side == "ask"), key=lambda w: -w.price)
+        bids = sorted((w for w in ws if w.side == "bid"), key=lambda w: -w.price)
+        if asks or bids:
+            t = [row("прод", w.price, w.usd, f"  x{w.ratio:<3.0f} {w.trust(now):>3} {fdur(w.age(now)):>7}")
+                 for w in asks]
+            t.append(f"{'':4} {fp(mid):>10}  цена")
+            t += [row("пок", w.price, w.usd, f"  x{w.ratio:<3.0f} {w.trust(now):>3} {fdur(w.age(now)):>7}")
+                  for w in bids]
+            lines.append("<b>Плотности</b>")
+            lines.append("<pre>" + "\n".join(t) + "</pre>")
+            lines.append("<i>x: во сколько раз больше соседей, затем доверие 0-100 и сколько живёт</i>")
         else:
-            lines.append("\nПлотностей по текущим порогам нет.")
-            # самые крупные заявки в зоне поиска: видно, насколько они не дотягивают до порога
-            lines.append(f"\n<b>Крупнейшие заявки в пределах {max_dist * 100:g}%:</b>")
-            for side, levels, icon in (("ask", book.asks, "🔸"), ("bid", book.bids, "🔹")):
+            lines.append("Плотностей по текущим порогам нет.")
+            lines.append(f"\n<b>Самые крупные заявки</b> (в пределах {max_dist * 100:g}%)")
+            t = []
+            for kind, levels in (("прод", book.asks), ("пок", book.bids)):
                 near = sorted(((px, sz * px) for px, sz in levels.items() if abs(px - mid) / mid <= max_dist),
                               key=lambda x: -x[1])[:3]
-                for px, usd in sorted(near, key=lambda x: -x[0]):
-                    lines.append(f"{icon} <code>{fp(px)}</code> ({(px / mid - 1) * 100:+.2f}%) {fusd(usd)}")
+                t += [row(kind, px, usd) for px, usd in sorted(near, key=lambda x: -x[0])]
+            lines.append("<pre>" + "\n".join(t) + "</pre>")
+
+        thr = " · ".join(f"{'покупка' if side == 'bid' else 'продажа'} {fusd(tr.thr[side])}"
+                         for side in ("bid", "ask") if side in tr.thr)
+        if sym in self.s["overrides"] and "min_wall_usd" in self.s["overrides"][sym]:
+            how = "своя настройка монеты"
+        elif self.s.get("auto_scale"):
+            how = (f"авто: минимум x{self.eff('wall_mult', sym):g} к соседям "
+                   f"и {self.s.get('wall_share_pct'):g}% заявок своей стороны")
+        else:
+            how = "общая настройка"
+        lines.append(f"\nПорог: {thr or '-'}\n<i>{how}</i>")
         bd, ad = book_depth(book, mid)
-        lines.append(f"\nГлубина стакана ±1%: bid {fusd(bd)} · ask {fusd(ad)}")
+        lines.append(f"\nСтакан ±1%: покупка {fusd(bd)} · продажа {fusd(ad)}")
         if self.thin(sym):
             lines.append(f"⚠️ <b>Тонкий стакан</b> (меньше {fusd(self.eff('min_book_usd', sym))}): "
                          "сигналы по монете не даются, проскальзывание съест прибыль")
         lo = (min(book.bids) / mid - 1) * 100
         hi = (max(book.asks) / mid - 1) * 100
-        lines.append(f"<i>Стакан виден от {lo:+.2f}% до {hi:+.2f}% ({len(book.bids) + len(book.asks)} уровней)</i>")
+        seen = f"Стакан виден от {lo:+.2f}% до {hi:+.2f}%"
         if min(-lo, hi) < max_dist * 100 * 0.8:
             if self.s.get("ob_depth") < 1000:
-                lines.append("<i>Стакан виден уже зоны поиска: дальние плотности не видны. "
-                             "Можно поднять глубину: /set ob_depth 1000</i>")
+                seen += ". Дальние плотности не видны, можно поднять глубину: /set ob_depth 1000"
             else:
-                lines.append("<i>Это максимум, который отдаёт Bybit (1000 уровней). "
-                             "Дальние плотности по этой монете не видны.</i>")
+                seen += ". Это максимум Bybit, дальние плотности не видны"
+        lines.append(f"<i>{seen}</i>")
         return "\n".join(lines)

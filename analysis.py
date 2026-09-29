@@ -6,7 +6,7 @@
 что это не случайность)."""
 import math
 
-from config import TYPE_NAMES
+from config import SHORT_NAMES
 
 HOURS = [(0, 6, "ночь 0-6"), (6, 12, "утро 6-12"), (12, 18, "день 12-18"), (18, 24, "вечер 18-24")]
 
@@ -26,7 +26,7 @@ def _usd(v):
 
 
 GROUPS = [
-    ("Тип сигнала", lambda r: TYPE_NAMES.get(r["type"], r["type"])),
+    ("Тип сигнала", lambda r: SHORT_NAMES.get(r["type"], r["type"])),
     ("Направление", lambda r: r["side"]),
     ("Время (Прага)", lambda r: next((l for a, b, l in HOURS if a <= r["f"].get("hour", -1) < b), None)),
     ("BTC за 5 мин", lambda r: {"with": "по движению BTC", "against": "против BTC",
@@ -74,13 +74,14 @@ def analyze(rows, min_n=15, title="всё время"):
     all_r = [r["r_pct"] for r in rows if r["r_pct"] is not None]
     base = stats(all_r)
     if not base:
-        return ["🧠 <b>Анализ</b>\nЗавершённых сигналов пока нет. Нужно подождать."]
+        return ["🧠 <b>Анализ</b>\nЗавершённых сигналов пока нет, нужно подождать."]
     head = [
-        f"🧠 <b>Анализ сигналов за {title}</b>",
-        f"Сигналов с результатом: {base['n']} · в плюс {base['win']:.0f}% · "
-        f"в среднем {base['mean']:+.3f}% на сделку · профит-фактор {_pf(base['pf'])}",
-        "<i>Результат каждого сигнала: виртуальная сделка до стопа/тейка/таймаута, "
-        "в % от позиции, с комиссиями.</i>",
+        f"🧠 <b>Анализ · {title}</b>",
+        "",
+        f"Сигналов с результатом: <b>{base['n']}</b>",
+        f"В плюс {base['win']:.0f}% · в среднем <b>{base['mean']:+.3f}%</b> на сделку · "
+        f"профит-фактор <b>{_pf(base['pf'])}</b>",
+        "<i>Каждый сигнал проверяется как сделка до стопа, тейка или таймаута, с комиссиями.</i>",
     ]
     findings = []
     sections = []
@@ -92,45 +93,46 @@ def analyze(rows, min_n=15, title="всё время"):
             b = key(r)
             if b is not None:
                 buckets.setdefault(b, []).append(r["r_pct"])
-        lines = []
         items = sorted(buckets.items(), key=lambda kv: -len(kv[1]))
         if gname == "Монета":
             items = items[:10]
+        table = []
         for b, rs in items:
             st = stats(rs)
             if st["n"] < min_n:
                 continue
             diff = st["mean"] - base["mean"]
-            mark = ""
+            mark = "  "
             if st["se"] and abs(diff) > 2 * st["se"]:
                 mark = " ✅" if diff > 0 else " ❌"
                 findings.append((abs(diff), diff, gname, b, st))
-            lines.append(f"  {b}: {st['n']} · плюс {st['win']:.0f}% · {st['mean']:+.3f}% · "
-                         f"PF {_pf(st['pf'])}{mark}")
-        if len(lines) >= 1:
-            sections.append(f"<b>{gname}</b>\n" + "\n".join(lines))
+            table.append(f"{str(b)[:18]:<18} {st['n']:>4} {st['win']:>4.0f}% {st['mean']:>+7.3f}%{mark}")
+        if table:
+            hdr = f"{'':<18} {'N':>4} {'плюс':>5} {'среднее':>8}"
+            sections.append(f"<b>{gname}</b>\n<pre>{hdr}\n" + "\n".join(table) + "</pre>")
 
-    out = ["\n".join(head)]
+    out = "\n".join(head)
     if findings:
         findings.sort(reverse=True)
-        fl = ["<b>Главные выводы</b> (отличие от среднего больше случайного):"]
+        fl = ["", "<b>Главные выводы</b>"]
         for _, diff, g, b, st in findings[:8]:
             icon = "✅" if diff > 0 else "❌"
             verdict = "лучше среднего" if diff > 0 else "хуже среднего"
-            fl.append(f"{icon} {g}: <b>{b}</b> {verdict}: {st['mean']:+.3f}% на сделку "
-                      f"({st['n']} сигналов, плюс {st['win']:.0f}%)")
-        out[0] += "\n\n" + "\n".join(fl)
+            fl.append(f"{icon} <b>{g}: {b}</b>\n    {verdict}, {st['mean']:+.3f}% на сделку "
+                      f"({st['n']} сигналов, в плюс {st['win']:.0f}%)")
+        fl.append("<i>Показаны только отличия, которые вряд ли случайны.</i>")
+        out += "\n" + "\n".join(fl)
     else:
         need = "" if base["n"] >= min_n * 4 else f" Нужно хотя бы ~{min_n * 4} сигналов."
-        out[0] += f"\n\nПока нет отличий, которые нельзя объяснить случайностью.{need}"
+        out += f"\n\nПока нет отличий, которые нельзя объяснить случайностью.{need}"
 
-    # детали по группам, дробим на сообщения до 3500 символов
-    cur = ""
+    msgs = [out]
+    cur = "📋 <b>Подробно по группам</b>"
     for sec in sections:
         if len(cur) + len(sec) > 3500:
-            out.append(cur)
+            msgs.append(cur)
             cur = ""
         cur += ("\n\n" if cur else "") + sec
-    if cur:
-        out.append(cur)
-    return out
+    if sections:
+        msgs.append(cur)
+    return msgs
