@@ -89,6 +89,14 @@ PARAMS = {
     "min_coin_move_pct": (3.0,     float, "-"),
     "min_confluence":   (0,        int,   "-"),
 
+    # --- новости и режим рынка ---
+    "news_pause":       (True,     bool,  "-"),
+    "news_before_min":  (15,       int,   "-"),
+    "news_after_min":   (15,       int,   "-"),
+    "news_currencies":  ("USD",    str,   "-"),
+    "news_impact":      ("High",   str,   "-"),
+    "regime_block":     ("",       str,   "-"),
+
     # --- вынос стопов ---
     "sweep_min_pct":    (0.05,     float, "-"),
     "sweep_max_pct":    (0.6,      float, "-"),
@@ -159,6 +167,9 @@ LABELS = {
     "sweep_window_sec": "Вернуться за уровень за, сек",
     "near_stop_exit": "Выход на втором подходе к стопу", "near_stop_zone": "Близко к стопу, доля пути",
     "near_stop_reset": "Отошла от стопа, доля пути",
+    "news_pause": "Пауза на важных новостях", "news_before_min": "Пауза до новости, мин",
+    "news_after_min": "Пауза после новости, мин", "news_currencies": "Новости каких стран",
+    "news_impact": "Какие новости", "regime_block": "Не торговать в режимах",
 }
 
 # Пояснения простым языком: что меняет параметр (показываются в настройках под названием)
@@ -238,6 +249,14 @@ DESCS = {
     "near_stop_zone": "0.2 значит цена в последних 20% пути от входа до стопа",
     "near_stop_reset": "Подход считается новым, если между ними цена отошла хотя бы на эту долю пути "
                        "(0.5 это половина пути до стопа)",
+    "news_pause": "Вокруг важных экономических новостей (ставка ФРС, инфляция, занятость) рынок дёргается "
+                  "непредсказуемо. Сделки не открываются, сигналы проверяются виртуально",
+    "news_before_min": "За сколько минут до новости перестать открывать сделки",
+    "news_after_min": "Сколько минут после новости ждать",
+    "news_currencies": "Валюты через запятую. USD это США, для крипты важнее всего. Например: USD,EUR",
+    "news_impact": "Только самые важные или ещё и средние",
+    "regime_block": "Режимы рынка через запятую, в которых не открывать сделки: тренд вверх, тренд вниз, "
+                    "боковик, тихо, паника. Пусто значит торговать везде. Сравни режимы в /analyze",
 }
 for _k, _d in DESCS.items():
     PARAMS[_k] = (PARAMS[_k][0], PARAMS[_k][1], _d)
@@ -251,6 +270,7 @@ ENUMS = {
     "liq_mode": {"reversal": "против каскада", "momentum": "по каскаду"},
     "size_mode": {"risk": "по риску", "margin": "по залогу"},
     "bounce_entry": {"touch": "по касанию", "limit": "лимиткой", "confirm": "после подтверждения"},
+    "news_impact": {"High": "только важные", "Medium": "важные и средние"},
     "ob_depth": {50: "50", 200: "200", 1000: "1000"},
 }
 
@@ -260,6 +280,8 @@ SHORT_NAMES = {
     "volume": "Импульс", "volume_rev": "Откат", "liq": "Ликвидации",
     "bounce_limit": "Отскок лимит", "bounce_confirm": "Отскок подтв", "sweep": "Вынос стопов",
 }
+
+REGIMES = ["тренд вверх", "тренд вниз", "боковик", "тихо", "паника"]
 
 # названия для статистики: у пробоя и объёма есть вариант «против сигнала»,
 # его статистика считается отдельно
@@ -307,7 +329,10 @@ def _cast(key, raw):
         except ValueError:
             raise ValueError("нужно число, например 500k, 2.5m или 0.3") from None
         return int(val) if typ is int else val
-    return str(raw).strip()
+    s = str(raw).strip()
+    if key == "regime_block" and s.lower() in ("-", "нет", "0", "пусто", "off"):
+        return ""
+    return s
 
 
 def _validate(key, val):
@@ -323,6 +348,10 @@ def _validate(key, val):
         raise ValueError("reversal или momentum")
     if key in ENUMS and val not in ENUMS[key]:
         raise ValueError("варианты: " + ", ".join(map(str, ENUMS[key])))
+    if key == "regime_block" and val:
+        bad = [r for r in (x.strip() for x in val.split(",")) if r and r not in REGIMES]
+        if bad:
+            raise ValueError("неизвестные режимы: " + ", ".join(bad) + ". Есть: " + ", ".join(REGIMES))
     if key == "ob_depth" and val not in (50, 200, 1000):
         raise ValueError("50, 200 или 1000")
     if isinstance(val, (int, float)) and not isinstance(val, bool) and val < 0:

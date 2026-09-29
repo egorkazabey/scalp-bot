@@ -26,6 +26,8 @@ GROUPS = {
                               "max_walls_side", "min_wall_age_sec", "min_trust", "approach_pct"]),
     "flow": ("📊 Объём и ликвидации", ["volume_mode", "vol_mult", "vol_min_move_pct", "vol_min_usd",
                                       "liq_mode", "liq_usd", "liq_turnover_pct", "auto_scale"]),
+    "market": ("📰 Новости и режим рынка", ["news_pause", "news_before_min", "news_after_min",
+                                          "news_currencies", "news_impact", "regime_block"]),
     "sweep": ("🎣 Вынос стопов", ["sweep_min_pct", "sweep_max_pct", "sweep_window_sec"]),
     "size": ("💼 Размер сделки", ["paper_enabled", "start_balance", "size_mode", "risk_pct", "margin_pct",
                                  "max_leverage", "rr"]),
@@ -66,6 +68,7 @@ HELP = """📖 <b>Команды</b>
 /signals · последние сигналы
 /analyze · что работает, а что нет
 /unpause · снять автопаузы
+/news · важные новости недели
 
 <b>Настройки</b>
 /settings · все настройки кнопками
@@ -131,7 +134,7 @@ class TgBot:
             "coins": self.cmd_coins, "add": self.cmd_add, "remove": self.cmd_remove,
             "auto": self.cmd_auto, "manual": self.cmd_manual, "movers": self.cmd_movers, "mix": self.cmd_mix, "walls": self.cmd_walls,
             "signals": self.cmd_signals, "stats": self.cmd_stats, "trades": self.cmd_trades,
-            "analyze": self.cmd_analyze, "unpause": self.cmd_unpause,
+            "analyze": self.cmd_analyze, "unpause": self.cmd_unpause, "news": self.cmd_news,
             "settings": self.cmd_settings, "set": self.cmd_set, "unset": self.cmd_unset,
             "pause": self.cmd_pause, "resume": self.cmd_resume,
             "reset_paper": self.cmd_reset_paper, "reset_settings": self.cmd_reset_settings,
@@ -150,6 +153,7 @@ class TgBot:
                 ("menu", "Главное меню"), ("status", "Состояние"), ("coins", "Монеты"),
                 ("walls", "Плотности по монете"), ("signals", "Последние сигналы"),
                 ("stats", "Статистика"), ("trades", "Бумажные сделки"), ("analyze", "Анализ: что работает"),
+                ("news", "Важные новости"),
                 ("settings", "Настройки"),
                 ("pause", "Пауза"), ("resume", "Продолжить"), ("help", "Все команды"),
             ])
@@ -249,6 +253,15 @@ class TgBot:
             f"Сегодня {money(e.paper.day_pnl())}",
             f"Открыто сделок: {len(e.paper.open)}" + (f" ({money(unreal)})" if e.paper.open else ""),
         ]
+        reg = e.market_regime()
+        now = time.time()
+        nxt = e.calendar.upcoming(now, self.s.get("news_currencies"), self.s.get("news_impact"), 1)
+        lines += ["", f"🌡 Рынок (BTC): <b>{reg or 'ещё считаю'}</b>"]
+        if e.news_event(now):
+            lines.append("📰 <b>Сейчас пауза на новостях</b>")
+        elif nxt:
+            lines.append(f"📰 Ближайшая новость: {html.escape(nxt[0][1])} "
+                         f"{time.strftime('%d.%m %H:%M', time.localtime(nxt[0][0]))}")
         warn = []
         if self.s["auto_paused"]:
             names = [k.split(":", 1)[1] for k in self.s["auto_paused"]]
@@ -580,6 +593,26 @@ class TgBot:
             self.s["pause_reset"][k] = now
         self.s["auto_paused"] = {}
         await self._reply(update, "▶️ Все автопаузы сняты.")
+
+    async def cmd_news(self, update, ctx):
+        e = self.engine
+        now = time.time()
+        evs = e.calendar.upcoming(now, self.s.get("news_currencies"), self.s.get("news_impact"), 15)
+        if not evs:
+            await self._reply(update, "📰 Важных новостей на эту неделю не нашёл"
+                              + ("" if e.calendar.updated else " (календарь ещё не загрузился)") + ".")
+            return
+        rows = []
+        for ts, title, country, impact in evs:
+            mark = "🔴" if impact == "High" else "🟠"
+            lt = time.localtime(ts)
+            wd = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"][lt.tm_wday]
+            rows.append(f"{mark} {wd} {time.strftime('%d.%m %H:%M', lt)} · {country} · "
+                        f"{html.escape(title)}")
+        pause = (f"Пауза: за {self.s.get('news_before_min')} мин до и {self.s.get('news_after_min')} мин после"
+                 if self.s.get("news_pause") else "Пауза на новостях выключена")
+        await self._reply(update, "📰 <b>Важные новости</b> (время пражское)\n\n" + "\n".join(rows)
+                          + f"\n\n<i>{pause}</i>")
 
     async def cmd_signals(self, update, ctx):
         await self._reply(update, self.text_last())

@@ -94,6 +94,9 @@ GROUPS = [
                                           (None, "давят за сделку")], None)),
     ("Поглощение", lambda r: r["f"].get("absorb") or ("нет" if "delta1" in r["f"] else None)),
     ("Айсберг рядом", lambda r: r["f"].get("iceberg") or ("нет" if "delta1" in r["f"] else None)),
+    ("Режим рынка (BTC)", lambda r: r["f"].get("regime")),
+    ("Новости", lambda r: "рядом с важной новостью" if r["f"].get("news") else
+        ("обычное время" if "regime" in r["f"] else None)),
     ("Совпало факторов", lambda r: None if r["f"].get("conf") is None else
         {0: "0", 1: "1", 2: "2"}.get(r["f"]["conf"], "3+")),
     ("Монета", lambda r: r["symbol"].replace("USDT", "")),

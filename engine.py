@@ -1,5 +1,6 @@
 """Движок: получает данные, гоняет детекторы, создаёт сигналы, ведёт бумажные сделки."""
 import asyncio
+import os
 import logging
 import time
 
@@ -7,6 +8,8 @@ from bybit import BybitFeed
 from config import TYPE_NAMES
 from detectors import FlowTracker, LiqTracker, OITracker, PriceHistory, VolumeTracker, WallTracker
 from chart import ChartState, parse_klines
+from config import DATA_DIR
+from news import Calendar
 from paper import PaperTrader, near_stop_step
 
 log = logging.getLogger("engine")
@@ -84,6 +87,8 @@ class Engine:
         self.limits = {}     # монета -> [лимитки, ждущие исполнения]
         self.confirms = {}   # монета -> [отскоки, ждущие подтверждения]
         self.charts = {}     # монета -> ChartState (свечи 15м и 1ч)
+        self.calendar = Calendar(os.path.join(DATA_DIR, "calendar.json"))
+        self._news_active = None   # событие, вокруг которого сейчас пауза
         self._stale_alerted = False
 
     # ---------- жизненный цикл ----------
@@ -98,6 +103,7 @@ class Engine:
             asyncio.create_task(self._slow_loop()),
             asyncio.create_task(self._auto_refresh()),
             asyncio.create_task(self._chart_loop()),
+            asyncio.create_task(self._news_loop()),
         ]
 
     async def stop(self):
@@ -235,6 +241,42 @@ class Engine:
             for sym in [s for s in self.charts if s not in self.symbols and s != "BTCUSDT"]:
                 del self.charts[sym]
             await asyncio.sleep(300)
+
+    async def _news_loop(self):
+        """Календарь событий: обновление раз в 2 часа (при ошибке через 10 минут)."""
+        while True:
+            try:
+                await self.calendar.refresh(await self.feed.session())
+                await asyncio.sleep(7200)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("calendar: %s", e)
+                await asyncio.sleep(600)
+
+    def news_event(self, now):
+        if not self.s.get("news_pause"):
+            return None
+        return self.calendar.window(now, self.s.get("news_before_min"), self.s.get("news_after_min"),
+                                    self.s.get("news_currencies"), self.s.get("news_impact"))
+
+    def market_regime(self):
+        """Режим рынка по BTC: тренд вверх или вниз, боковик, тихо, паника."""
+        ch = self.charts.get("BTCUSDT")
+        px = self.price("BTCUSDT")
+        if not ch or not px or len(ch.k15) < 17:
+            return None
+        f = ch.features(px, "LONG")
+        tr1, tr4 = f.get("tr1h", 0), f.get("tr4h", 0)
+        last = ch.k15[-5:-1]
+        vol = sum((k[2] - k[3]) / k[4] * 100 for k in last) / len(last)   # средний размах 15м свечи, %
+        if tr1 <= -1.5 or (vol >= 1.0 and tr1 < 0):
+            return "паника"
+        if abs(tr4) >= 1.5:
+            return "тренд вверх" if tr4 > 0 else "тренд вниз"
+        if vol <= 0.15:
+            return "тихо"
+        return "боковик"
 
     def say(self, text, symbol=None):
         """symbol: к сообщению добавится кнопка с графиком этой монеты на Bybit."""
@@ -544,6 +586,11 @@ class Engine:
 
     def _filter_reason(self, sym, f):
         """Фильтры из выводов анализа. Отфильтрованный сигнал всё равно проверяется виртуально."""
+        if f.get("news"):
+            return f"важные новости: {f['news']}"
+        block = [x.strip() for x in self.s.get("regime_block").split(",") if x.strip()]
+        if f.get("regime") and f["regime"] in block:
+            return f"режим рынка: {f['regime']}"
         mx = self.eff("max_depth_usd", sym)
         if mx and f.get("depth") and f["depth"] > mx:
             return "крупная монета с очень глубоким стаканом"
@@ -586,6 +633,13 @@ class Engine:
             f["vol_move"] = details.get("move")
         if "longs" in details:
             f["liq_usd"] = details["longs"] + details["shorts"]
+        # режим рынка и новости
+        reg = self.market_regime()
+        if reg:
+            f["regime"] = reg
+        ev = self.news_event(now)
+        if ev:
+            f["news"] = ev[1]
         # картина на графике: тренд, EMA, RSI, уровни суток
         ch = self.charts.get(sym)
         if ch:
@@ -903,9 +957,22 @@ class Engine:
                 for t in self.paper.check_timeouts(self.prices()):
                     self.say(self._fmt_close(t), t["symbol"])
                 self._timeout_virtual(now)
+                self._news_notify(now)
                 await self._watchdog(now)
             except Exception:
                 log.exception("slow loop")
+
+    def _news_notify(self, now):
+        ev = self.news_event(now)
+        if ev and ev != self._news_active:
+            self._news_active = ev
+            t = time.strftime("%H:%M", time.localtime(ev[0]))
+            until = time.strftime("%H:%M", time.localtime(ev[0] + self.s.get("news_after_min") * 60))
+            self.say(f"📰 <b>Пауза на новостях</b>\n{ev[1]} ({ev[2]}) в {t}.\n"
+                     f"Новые сделки не открываю до {until}, открытые веду как обычно.")
+        elif not ev and self._news_active:
+            self._news_active = None
+            self.say("📰 Пауза на новостях закончилась, снова открываю сделки.")
 
     async def _watchdog(self, now):
         """Если данных с Bybit нет больше 90 сек, предупреждаем и перезапускаем поток."""
