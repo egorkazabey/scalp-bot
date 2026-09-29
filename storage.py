@@ -33,14 +33,21 @@ class Storage:
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        # новые колонки для старых баз: обстановка сигнала и его виртуальный результат
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(signals)")}
+        for col, typ in (("features", "TEXT"), ("result", "TEXT"), ("r_pct", "REAL"), ("closed_ts", "REAL")):
+            if col not in cols:
+                self.db.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
         self.db.commit()
 
     # ---------- сигналы ----------
     def add_signal(self, sig):
         cur = self.db.execute(
-            "INSERT INTO signals (ts, symbol, type, side, price, sl, tp, details) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO signals (ts, symbol, type, side, price, sl, tp, details, features) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (sig["ts"], sig["symbol"], sig["type"], sig["side"], sig["price"],
-             sig["sl"], sig["tp"], json.dumps(sig.get("details", {}), ensure_ascii=False)),
+             sig["sl"], sig["tp"], json.dumps(sig.get("details", {}), ensure_ascii=False),
+             json.dumps(sig.get("features", {}), ensure_ascii=False)),
         )
         self.db.commit()
         return cur.lastrowid
@@ -55,6 +62,50 @@ class Storage:
             "SELECT id, ts, symbol, p1, p5, p15 FROM signals WHERE p15 IS NULL AND ts > ?",
             (time.time() - 3600,),
         ).fetchall()
+
+    # ---------- виртуальный результат каждого сигнала ----------
+    def set_signal_result(self, sig_id, result, r_pct):
+        self.db.execute("UPDATE signals SET result=?, r_pct=?, closed_ts=? WHERE id=?",
+                        (result, r_pct, time.time(), sig_id))
+        self.db.commit()
+
+    def open_virtual(self, since):
+        return self.db.execute(
+            "SELECT id, ts, symbol, type, side, price, sl, tp FROM signals WHERE result IS NULL AND ts > ?",
+            (since,)).fetchall()
+
+    def expire_virtual(self, before):
+        """Сигналы, которые не удалось довести до конца (например, бот был выключен)."""
+        self.db.execute("UPDATE signals SET result='lost' WHERE result IS NULL AND ts <= ?", (before,))
+        self.db.commit()
+
+    def last_results(self, n, typ=None, symbol=None, since=0):
+        q = "SELECT r_pct FROM signals WHERE result IN ('tp','sl','time') AND ts >= ?"
+        args = [since]
+        if typ:
+            q += " AND type=?"
+            args.append(typ)
+        if symbol:
+            q += " AND symbol=?"
+            args.append(symbol)
+        q += " ORDER BY id DESC LIMIT ?"
+        args.append(int(n))
+        return [r[0] for r in self.db.execute(q, args).fetchall()]
+
+    def results(self, since=0):
+        """Сигналы с результатом и обстановкой, для анализа."""
+        rows = self.db.execute(
+            "SELECT id, ts, symbol, type, side, result, r_pct, features FROM signals "
+            "WHERE result IN ('tp','sl','time') AND ts >= ? ORDER BY id", (since,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["f"] = json.loads(r["features"] or "{}")
+            except ValueError:
+                d["f"] = {}
+            out.append(d)
+        return out
 
     def recent_signals(self, limit=10):
         return self.db.execute("SELECT * FROM signals ORDER BY id DESC LIMIT ?", (limit,)).fetchall()

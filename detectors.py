@@ -228,3 +228,12 @@ class PriceHistory:
             else:
                 break
         return best
+
+    def range_pct(self, sec, now):
+        """Размах цены (макс - мин) за последние sec секунд, % от цены. None, если истории мало."""
+        if not self.points or self.points[0][0] > now - sec + 5:
+            return None
+        pts = [p for ts, p in self.points if ts >= now - sec]
+        if len(pts) < 2:
+            return None
+        return (max(pts) - min(pts)) / pts[-1] * 100

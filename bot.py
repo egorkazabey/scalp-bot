@@ -12,6 +12,7 @@ from telegram.error import RetryAfter, TelegramError
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes,
                           MessageHandler, filters)
 
+from analysis import analyze
 from config import PARAMS, SIGNAL_TYPES, TYPE_NAMES
 from engine import Engine, fdur, fp, fusd
 from paper import today_start
@@ -29,6 +30,7 @@ GROUPS = {
                                             "margin_pct", "max_leverage",
                                             "rr", "sl_buffer_pct", "default_sl_pct", "min_sl_pct", "stop_pause_min", "max_hold_min",
                                             "max_open", "daily_loss_pct", "fee_pct", "maker_fee_pct", "slippage_pct", "tp_through_pct"]),
+    "learn": ("🧠 Обучение", ["auto_pause", "pause_window", "pause_coin_window", "analyze_min"]),
     "general": ("⚙️ Общее", ["cooldown_sec", "btc_filter", "btc_filter_pct"]),
 }
 FEED_KEYS = {"coin_mode", "auto_top_n", "movers_n", "auto_min_turnover", "max_coins", "ob_depth"}
@@ -49,6 +51,8 @@ HELP = """<b>Команды</b>
 /walls SOL - текущие плотности по монете
 /signals - последние сигналы
 /stats - статистика · /trades - бумажные сделки
+/analyze - что работает, а что нет (по обстановке сигналов) · /analyze 7d
+/unpause - снять все автопаузы
 /settings - все настройки
 /set min_wall_usd 500k - изменить параметр
 /set BTC min_wall_usd 3m - параметр только для одной монеты
@@ -94,6 +98,7 @@ class TgBot:
             "coins": self.cmd_coins, "add": self.cmd_add, "remove": self.cmd_remove,
             "auto": self.cmd_auto, "manual": self.cmd_manual, "movers": self.cmd_movers, "mix": self.cmd_mix, "walls": self.cmd_walls,
             "signals": self.cmd_signals, "stats": self.cmd_stats, "trades": self.cmd_trades,
+            "analyze": self.cmd_analyze, "unpause": self.cmd_unpause,
             "settings": self.cmd_settings, "set": self.cmd_set, "unset": self.cmd_unset,
             "pause": self.cmd_pause, "resume": self.cmd_resume,
             "reset_paper": self.cmd_reset_paper, "reset_settings": self.cmd_reset_settings,
@@ -111,7 +116,8 @@ class TgBot:
             await app.bot.set_my_commands([
                 ("menu", "Главное меню"), ("status", "Состояние"), ("coins", "Монеты"),
                 ("walls", "Плотности по монете"), ("signals", "Последние сигналы"),
-                ("stats", "Статистика"), ("trades", "Бумажные сделки"), ("settings", "Настройки"),
+                ("stats", "Статистика"), ("trades", "Бумажные сделки"), ("analyze", "Анализ: что работает"),
+                ("settings", "Настройки"),
                 ("pause", "Пауза"), ("resume", "Продолжить"), ("help", "Все команды"),
             ])
         except TelegramError as e:
@@ -177,7 +183,7 @@ class TgBot:
             [B("📡 Статус", callback_data="scr:status"), B("🪙 Монеты", callback_data="scr:coins")],
             [B("🔔 Сигналы", callback_data="scr:sigs"), B("⚙️ Настройки", callback_data="scr:settings")],
             [B("📈 Статистика", callback_data="stats:today"), B("💼 Сделки", callback_data="scr:trades")],
-            [B("🧾 Последние сигналы", callback_data="scr:last")],
+            [B("🧾 Последние сигналы", callback_data="scr:last"), B("🧠 Анализ", callback_data="an:all")],
             [B("▶️ Продолжить" if paused else "⏸ Пауза", callback_data="toggle:pause")],
         ])
 
@@ -198,6 +204,9 @@ class TgBot:
             f"💰 Баланс: <b>{e.paper.balance():.2f}$</b> · за сегодня {e.paper.day_pnl():+.2f}$",
             f"Открыто сделок: {len(e.paper.open)} · нереализ. {e.paper.unrealized(prices):+.2f}$",
         ]
+        if self.s["auto_paused"]:
+            names = [k.split(":", 1)[1] for k in self.s["auto_paused"]]
+            lines.append("🧠 На автопаузе: " + ", ".join(TYPE_NAMES.get(n, n) for n in names))
         if e.paper.daily_stop_hit():
             lines.append("🛑 Дневной лимит убытка достигнут, новые сделки не открываются")
         if e.last_error:
@@ -461,6 +470,41 @@ class TgBot:
             return
         await self._reply(update, self.engine.walls_text(norm_symbol(ctx.args[0])))
 
+    def analyze_texts(self, period):
+        since = {"7d": time.time() - 7 * 86400, "1d": time.time() - 86400}.get(period, 0)
+        title = {"7d": "7 дней", "1d": "сутки"}.get(period, "всё время")
+        texts = analyze(self.db.results(since=since), self.s.get("analyze_min"), title)
+        ap = self.s["auto_paused"]
+        if ap:
+            lines = ["\n<b>На автопаузе</b> (сигналы пишутся и проверяются виртуально, без сделок):"]
+            for k, v in ap.items():
+                kind, name = k.split(":", 1)
+                what = TYPE_NAMES.get(name, name) if kind == "type" else name
+                lines.append(f"• {what}: {v['why']} (с {time.strftime('%d.%m %H:%M', time.localtime(v['since']))})")
+            texts[0] += "\n".join(lines)
+        return texts
+
+    def kb_analyze(self):
+        rows = [[B("Сутки", callback_data="an:1d"), B("7 дней", callback_data="an:7d"),
+                 B("Всё время", callback_data="an:all")]]
+        if self.s["auto_paused"]:
+            rows.append([B("▶️ Снять автопаузы", callback_data="do:unpause")])
+        rows.append(self.BACK)
+        return InlineKeyboardMarkup(rows)
+
+    async def cmd_analyze(self, update, ctx):
+        period = ctx.args[0] if ctx.args else "all"
+        texts = self.analyze_texts(period)
+        for i, t in enumerate(texts):
+            await self._reply(update, t, self.kb_analyze() if i == len(texts) - 1 else None)
+
+    async def cmd_unpause(self, update, ctx):
+        now = time.time()
+        for k in self.s["auto_paused"]:
+            self.s["pause_reset"][k] = now
+        self.s["auto_paused"] = {}
+        await self._reply(update, "▶️ Все автопаузы сняты.")
+
     async def cmd_signals(self, update, ctx):
         await self._reply(update, self.text_last())
 
@@ -545,6 +589,11 @@ class TgBot:
                 await self._reply(update, *self.screen_trades(), edit=True)
             elif arg == "last":
                 await self._reply(update, self.text_last(), InlineKeyboardMarkup([self.BACK]), edit=True)
+        elif kind == "an":
+            texts = self.analyze_texts(arg)
+            for i, t in enumerate(texts):
+                last = i == len(texts) - 1
+                await self._reply(update, t, self.kb_analyze() if last else None, edit=(i == 0 and len(texts) == 1))
         elif kind == "stats":
             await self._reply(update, self.text_stats(arg), self.kb_stats(), edit=True)
         elif kind == "grp":
@@ -601,6 +650,12 @@ class TgBot:
             if arg == "reset_paper":
                 self.engine.paper.reset()
                 await self._reply(update, f"♻️ Счёт сброшен. Баланс {self.engine.paper.balance():.2f}$", edit=True)
+            elif arg == "unpause":
+                now = time.time()
+                for k in self.s["auto_paused"]:
+                    self.s["pause_reset"][k] = now
+                self.s["auto_paused"] = {}
+                await self._reply(update, "▶️ Все автопаузы сняты.", edit=True)
             elif arg == "reset_settings":
                 self.s.reset_params()
                 await self.engine.restart_feed()
