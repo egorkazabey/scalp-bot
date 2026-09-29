@@ -499,8 +499,9 @@ class Engine:
         if pause_left > 0:
             trade, why = None, f"пауза по монете после стопа, ещё {fdur(pause_left)}"
         else:
+            mult = self.eff("strong_size_mult", sym) if self.is_strong(sym, f) else 1.0
             trade, why = self.paper.try_open(sig, sig["id"], book=self.feed.books.get(sym),
-                                             maker_entry=maker_entry)
+                                             maker_entry=maker_entry, size_mult=mult)
         if self.s["notify"].get(typ.split("_")[0], True):
             self.say(self._fmt_signal(sig, trade, why), sym)
 
@@ -617,10 +618,20 @@ class Engine:
         mn = self.eff("min_coin_move_pct", sym)
         if mn and f.get("chg24") is not None and abs(f["chg24"]) < mn:
             return "монета почти не двигается за сутки"
+        coins = [c.strip() for c in (self.s.get("blocked_coins") or "").split(",") if c.strip()]
+        if sym.removesuffix("USDT") in coins:
+            return "монета в списке запрещённых"
         mc = self.eff("min_confluence", sym)
         if mc and f.get("conf", 0) < mc:
             return f"совпало факторов {f.get('conf', 0)} из нужных {mc}"
+        lvl = self.eff("delta_block_lvl", sym)
+        if self.eff("delta_block", sym) and f.get("delta1") is not None and f["delta1"] <= -lvl:
+            return f"за минуту рынок давит против сделки (дельта {f['delta1']:+.2f})"
         return None
+
+    def is_strong(self, sym, f):
+        sc = self.eff("strong_conf", sym)
+        return bool(sc) and f.get("conf", 0) >= sc
 
     # ---------- обучение: обстановка, виртуальный результат, автопауза ----------
     def _features(self, sym, typ, side, price, sl, details, now):
@@ -873,9 +884,17 @@ class Engine:
         t = typ.split("_")[0]
         sl_pct = (sig["sl"] / pr - 1) * 100
         tp_pct = (sig["tp"] / pr - 1) * 100
+        f = sig.get("features", {})
+        strong = self.is_strong(sig["symbol"], f)
         lines = [
-            f"{'🟢' if long else '🔴'} <b>{sig['side']} {sig['symbol'].replace('USDT', '')}</b>",
+            f"{'🟢' if long else '🔴'} <b>{sig['side']} {sig['symbol'].replace('USDT', '')}</b>"
+            + ("  💪 <b>сильный сигнал</b>" if strong else ""),
             f"<i>{TYPE_NAMES.get(typ, typ)}</i>",
+        ]
+        if f.get("conf_list"):
+            names = {"btc": "BTC по пути", "volume": "объём", "liq": "ликвидации", "wall": "плотность"}
+            lines.append(f"Факторов {f['conf']}: " + ", ".join(names.get(c, c) for c in f["conf_list"]))
+        lines += [
             "",
             f"Вход   <code>{fp(pr)}</code>",
             f"Стоп   <code>{fp(sig['sl'])}</code>  {sl_pct:+.2f}%",
@@ -936,7 +955,8 @@ class Engine:
             entry_fee = trade.get("entry_fee_pct", self.s.get("fee_pct")) / 100
             risk = (abs(trade["entry"] - trade["sl"]) * trade["qty"] + notional * (entry_fee + fee)
                     + trade["sl"] * trade["qty"] * self.s.get("slippage_pct") / 100)
-            lines.append(f"📝 Сделка #{trade['id']} · позиция {fusd(notional)} · залог {fusd(notional / lev)} ×{lev:g}")
+            lines.append(f"📝 Сделка #{trade['id']} · позиция {fusd(notional)} · залог {fusd(notional / lev)} ×{lev:g}"
+                         + (f" · размер ×{trade['size_mult']:g}" if trade.get("size_mult", 1) != 1 else ""))
             lines.append(f"Риск на стопе ≈ {fusd(risk)} с комиссиями")
         elif why and self.s.get("paper_enabled"):
             lines.append(f"📝 Без сделки: {why}")

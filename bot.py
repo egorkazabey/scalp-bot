@@ -35,8 +35,9 @@ GROUPS = {
     "entry": ("🎯 Вход и выход", ["bounce_entry", "limit_offset_pct", "entry_wait_sec", "confirm_window_sec",
                                   "confirm_move_pct", "confirm_eat_pct", "breakeven", "be_trigger",
                                   "near_stop_exit", "near_stop_zone", "near_stop_reset"]),
-    "filters": ("🔍 Фильтры", ["max_depth_usd", "min_coin_move_pct", "min_confluence", "btc_filter",
-                              "btc_filter_pct"]),
+    "filters": ("🔍 Фильтры", ["min_confluence", "strong_conf", "strong_size_mult", "delta_block",
+                              "delta_block_lvl", "blocked_coins", "max_depth_usd", "min_coin_move_pct",
+                              "btc_filter", "btc_filter_pct"]),
     "protect": ("🛡 Защита", ["min_sl_pct", "sl_buffer_pct", "default_sl_pct", "max_hold_min", "max_open",
                              "max_same_side", "stop_pause_min", "daily_loss_pct", "cooldown_sec"]),
     "fees": ("🧾 Комиссии", ["fee_pct", "maker_fee_pct", "slippage_pct", "tp_through_pct"]),
@@ -115,6 +116,8 @@ def fval(key, v):
         return fusd(v)
     if isinstance(v, float):
         return f"{v:g}"
+    if v == "":
+        return "нет"
     return str(v)
 
 
@@ -749,7 +752,8 @@ class TgBot:
                 await self._reply(update, *self.screen_group(grp), edit=True)
             else:
                 ctx.user_data["pending"] = ("set", arg)
-                ex = "500k или 2m" if arg in MONEY_KEYS else "0.5" if isinstance(cur, float) else "30"
+                ex = ("500k или 2m" if arg in MONEY_KEYS else "SOXL,ALGO" if arg == "blocked_coins"
+                      else "0.5" if isinstance(cur, float) else "30")
                 await self._reply(update, f"✏️ <b>{LABELS[arg]}</b>\nСейчас: <b>{fval(arg, cur)}</b>\n"
                                           f"<i>{PARAMS[arg][2]}</i>\n\nОтправь новое значение, например <code>{ex}</code>")
         elif kind == "close":

@@ -66,7 +66,7 @@ class PaperTrader:
                 return cost / qty
         return None
 
-    def try_open(self, sig, signal_id, book=None, maker_entry=False):
+    def try_open(self, sig, signal_id, book=None, maker_entry=False, size_mult=1.0):
         """Возвращает (trade или None, причина отказа). С book вход считается проходом по стакану."""
         if not self.s.get("paper_enabled"):
             return None, "бумажная торговля выключена"
@@ -101,7 +101,9 @@ class PaperTrader:
             # и выход и проскальзыванием на стопе
             risk_usd = bal * self.s.get("risk_pct") / 100
             loss_per_usd = risk_dist + entry_fee + fee + slip
-            notional = min(risk_usd / loss_per_usd, bal * lev)
+            notional = risk_usd / loss_per_usd
+        # сильный сигнал: позиция больше (и риск на стопе больше во столько же раз)
+        notional = min(notional * max(size_mult, 0.1), bal * lev)
         qty = notional / entry
         if book is not None and not maker_entry:
             fill = self.walk_book(book, sig["side"], qty)
@@ -116,6 +118,7 @@ class PaperTrader:
             "signal_id": signal_id, "symbol": sig["symbol"], "type": sig["type"],
             "side": sig["side"], "entry": entry, "qty": qty, "sl": sig["sl"], "tp": sig["tp"],
             "open_ts": time.time(), "fees": notional * entry_fee, "entry_fee_pct": entry_fee * 100,
+            "size_mult": size_mult,
         }
         t["id"] = self.db.open_trade(t)
         self.open[t["id"]] = t
