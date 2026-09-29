@@ -3,6 +3,22 @@ import time
 from datetime import datetime
 
 
+def near_stop_step(state, entry, sl0, price, zone, reset):
+    """Считает подходы цены к стопу. state: dict с near_in, near_n. True, если это второй подход."""
+    span = entry - sl0
+    if span == 0:
+        return False
+    frac = (price - sl0) / span      # 1 на входе, 0 на стопе (для лонга и шорта одинаково)
+    if frac <= zone:
+        if not state.get("near_in"):
+            state["near_in"] = True
+            state["near_n"] = state.get("near_n", 0) + 1
+            return state["near_n"] >= 2
+    elif frac >= reset:
+        state["near_in"] = False
+    return False
+
+
 def today_start():
     d = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     return d.timestamp()
@@ -114,9 +130,14 @@ class PaperTrader:
             if t["symbol"] != symbol:
                 continue
             long = t["side"] == "LONG"
+            t.setdefault("sl0", t["sl"])   # исходный стоп: от него считаем подходы
             self._maybe_breakeven(t, price)
             if (long and price <= t["sl"]) or (not long and price >= t["sl"]):
                 closed.append(self._close(tid, t["sl"], "безубыток" if t.get("be") else "стоп", slip=True))
+            elif (self.s.get("near_stop_exit") and not t.get("be")
+                  and near_stop_step(t, t["entry"], t["sl0"], price,
+                                     self.s.get("near_stop_zone"), self.s.get("near_stop_reset"))):
+                closed.append(self._close(tid, price, "второй подход к стопу", slip=True))
             elif (long and price > t["tp"] * (1 + through)) or (not long and price < t["tp"] * (1 - through)):
                 # тейк стоит лимитным ордером: без проскальзывания и с мейкерской комиссией
                 closed.append(self._close(tid, t["tp"], "тейк", slip=False, maker=True))

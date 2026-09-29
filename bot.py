@@ -30,7 +30,8 @@ GROUPS = {
     "size": ("💼 Размер сделки", ["paper_enabled", "start_balance", "size_mode", "risk_pct", "margin_pct",
                                  "max_leverage", "rr"]),
     "entry": ("🎯 Вход и выход", ["bounce_entry", "limit_offset_pct", "entry_wait_sec", "confirm_window_sec",
-                                  "confirm_move_pct", "confirm_eat_pct", "breakeven", "be_trigger"]),
+                                  "confirm_move_pct", "confirm_eat_pct", "breakeven", "be_trigger",
+                                  "near_stop_exit", "near_stop_zone", "near_stop_reset"]),
     "filters": ("🔍 Фильтры", ["max_depth_usd", "min_coin_move_pct", "min_confluence", "btc_filter",
                               "btc_filter_pct"]),
     "protect": ("🛡 Защита", ["min_sl_pct", "sl_buffer_pct", "default_sl_pct", "max_hold_min", "max_open",
@@ -548,7 +549,7 @@ class TgBot:
         since = {"7d": time.time() - 7 * 86400, "1d": time.time() - 86400}.get(period, 0)
         title = {"7d": "7 дней", "1d": "сутки"}.get(period, "всё время")
         texts = analyze(self.db.results(since=since), self.s.get("analyze_min"), title,
-                        use_be=self.s.get("breakeven"))
+                        exit_col=self.engine.exit_col())
         ap = self.s["auto_paused"]
         if ap:
             lines = ["\n\n⏸ <b>На автопаузе</b>\n<i>без сделок и уведомлений, сигналы проверяются виртуально</i>"]

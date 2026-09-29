@@ -7,7 +7,7 @@ from bybit import BybitFeed
 from config import TYPE_NAMES
 from detectors import FlowTracker, LiqTracker, OITracker, PriceHistory, VolumeTracker, WallTracker
 from chart import ChartState, parse_klines
-from paper import PaperTrader
+from paper import PaperTrader, near_stop_step
 
 log = logging.getLogger("engine")
 
@@ -677,44 +677,52 @@ class Engine:
             fees += fee
         return sign * (exit_price / entry - 1) * 100 - fees
 
+    # варианты выхода: (безубыток, выход на втором подходе к стопу) -> колонка в БД
+    EXITS = {"base": (False, False, "r_pct"), "be": (True, False, "r_be"),
+             "near": (False, True, "r_near"), "both": (True, True, "r_both")}
+
+    def exit_col(self):
+        """Колонка результата для текущих настроек выхода."""
+        be, near = bool(self.s.get("breakeven")), bool(self.s.get("near_stop_exit"))
+        return next(c for b, n, c in self.EXITS.values() if b == be and n == near)
+
     def _check_virtual(self, sym, price):
         through = self.s.get("tp_through_pct") / 100
         trig = self.s.get("be_trigger")
+        zone, reset = self.s.get("near_stop_zone"), self.s.get("near_stop_reset")
         for sid, v in list(self.virtual.get(sym, {}).items()):
             long = v["side"] == "LONG"
             res = v.setdefault("res", {})
+            legs = v.setdefault("legs", {})
             tp_hit = (long and price > v["tp"] * (1 + through)) or (not long and price < v["tp"] * (1 - through))
-            # без безубытка
-            if "base" not in res:
-                if (long and price <= v["sl"]) or (not long and price >= v["sl"]):
-                    res["base"] = ("sl", v["sl"])
-                elif tp_hit:
-                    res["base"] = ("tp", v["tp"])
-            # с безубытком
-            if "be" not in res:
-                if v.get("be_sl") is None:
+            for leg, (use_be, use_near, _) in self.EXITS.items():
+                if leg in res:
+                    continue
+                st = legs.setdefault(leg, {})
+                if use_be and st.get("be_sl") is None:
                     span = v["tp"] - v["price"]
                     if span and (price - v["price"]) / span >= trig:
-                        v["be_sl"] = self.paper.be_price(
+                        st["be_sl"] = self.paper.be_price(
                             v["price"], v["side"], self.s.get("maker_fee_pct") if v.get("maker") else None)
-                stop = v["be_sl"] if v.get("be_sl") is not None else v["sl"]
+                stop = st.get("be_sl") or v["sl"]
                 if (long and price <= stop) or (not long and price >= stop):
-                    res["be"] = ("sl", stop)
+                    res[leg] = ("sl", stop)
                 elif tp_hit:
-                    res["be"] = ("tp", v["tp"])
-            if "base" in res and "be" in res:
+                    res[leg] = ("tp", v["tp"])
+                elif use_near and st.get("be_sl") is None and near_stop_step(st, v["price"], v["sl"], price,
+                                                                              zone, reset):
+                    res[leg] = ("near", price)
+            if all(leg in res for leg in self.EXITS):
                 self._finish_virtual(v)
 
     def _finish_virtual(self, v, price=None):
         res = v.setdefault("res", {})
-        for leg in ("base", "be"):
+        for leg in self.EXITS:
             if leg not in res and price:
                 res[leg] = ("time", price)
         self.virtual.get(v["symbol"], {}).pop(v["id"], None)
-        rb, eb = res["base"]
-        r_base = self._virtual_r(v, eb, rb)
-        r_be = self._virtual_r(v, res["be"][1], res["be"][0])
-        self.db.set_signal_result(v["id"], rb, r_base, r_be)
+        r = {leg: self._virtual_r(v, res[leg][1], res[leg][0]) for leg in self.EXITS}
+        self.db.set_signal_result(v["id"], res["base"][0], r["base"], r["be"], r["near"], r["both"])
         if self.s.get("auto_pause"):
             self._update_pauses(v["type"], v["symbol"])
 
@@ -755,7 +763,7 @@ class Engine:
         for key, name, win, flt, bad_avg, bad_pf in checks:
             if key not in ap:
                 since = self.s["pause_reset"].get(key, 0)
-                n, avg, pf = self._perf(self.db.last_results(win, since=since, be=self.s.get("breakeven"), **flt))
+                n, avg, pf = self._perf(self.db.last_results(win, since=since, col=self.exit_col(), **flt))
                 if n >= win and avg < bad_avg and pf < bad_pf:
                     why = f"последние {n} сигналов: в среднем {avg:+.2f}% на сделку, профит-фактор {pf:.2f}"
                     ap[key] = {"since": time.time(), "why": why}
@@ -769,7 +777,7 @@ class Engine:
                 # возвращаем, когда свежая половина окна (собранная уже во время паузы) в плюсе
                 half = max(5, win // 2)
                 since = ap[key]["since"]
-                col = "r_be" if self.s.get("breakeven") else "r_pct"
+                col = self.exit_col()
                 rs = [(r[col] if r[col] is not None else r["r_pct"]) for r in self.db.results(since=since)
                       if (flt.get("typ") in (None, r["type"])) and (flt.get("symbol") in (None, r["symbol"]))]
                 n, avg, pf = self._perf(rs[-half:])
@@ -862,8 +870,9 @@ class Engine:
     def _fmt_close(self, t):
         if t.get("reason") == "стоп":
             self.stop_block[t["symbol"]] = time.time()
-        icon = {"тейк": "✅", "стоп": "❌", "время": "⏱", "вручную": "✋", "безубыток": "⚪"}.get(t["reason"], "•")
-        if t["reason"] in ("время", "вручную"):
+        icon = {"тейк": "✅", "стоп": "❌", "время": "⏱", "вручную": "✋", "безубыток": "⚪",
+                "второй подход к стопу": "🚪"}.get(t["reason"], "•")
+        if t["reason"] in ("время", "вручную", "второй подход к стопу"):
             icon = ("✅ " if t["pnl"] > 0 else "❌ ") + icon
         pct = (t["exit"] / t["entry"] - 1) * 100 * (1 if t["side"] == "LONG" else -1)
         mins = fdur(time.time() - t["open_ts"]) if t.get("open_ts") else ""

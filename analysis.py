@@ -116,16 +116,20 @@ def _pf(v):
     return "∞" if v == float("inf") else f"{v:.2f}"
 
 
-def analyze(rows, min_n=15, title="всё время", use_be=False):
+EXIT_NAMES = {"r_pct": "просто стоп и тейк", "r_be": "с безубытком",
+              "r_near": "выход на втором подходе к стопу", "r_both": "безубыток + второй подход"}
+
+
+def analyze(rows, min_n=15, title="всё время", exit_col="r_pct"):
     """Возвращает список сообщений (Telegram ограничивает длину).
     Тип сигнала сравниваем по всем вариантам (включая виртуальные способы входа),
     остальные группы только по сигналам, которые реально торговались бы."""
-    # безубыток: берём результат выбранного варианта выхода
-    both = [r for r in rows if r["r_pct"] is not None and r.get("r_be") is not None]
+    # варианты выхода: сравниваем на сигналах, где посчитаны все, основной берём по настройкам
+    both = [r for r in rows if r["r_pct"] is not None and all(r.get(c) is not None for c in EXIT_NAMES)]
     for r in rows:
-        r["_r_base"] = r["r_pct"]
-        if use_be and r.get("r_be") is not None:
-            r["r_pct"] = r["r_be"]
+        r["_orig"] = {c: r.get(c) for c in EXIT_NAMES}
+        if r.get(exit_col) is not None:
+            r["r_pct"] = r[exit_col]
     all_rows = rows
     rows = [r for r in rows if not r["f"].get("shadow")]
     all_r = [r["r_pct"] for r in rows if r["r_pct"] is not None]
@@ -142,10 +146,11 @@ def analyze(rows, min_n=15, title="всё время", use_be=False):
     ]
     live_both = [r for r in both if not r["f"].get("shadow")]
     if len(live_both) >= min_n:
-        b0 = stats([r["_r_base"] for r in live_both])
-        b1 = stats([r["r_be"] for r in live_both])
-        head.append(f"\n⚪ <b>Безубыток</b> ({'включён' if use_be else 'выключен'}): с ним {b1['mean']:+.3f}% "
-                    f"на сделку, без него {b0['mean']:+.3f}%")
+        head.append(f"\n🚪 <b>Варианты выхода</b> ({len(live_both)} сигналов)")
+        for c, name in EXIT_NAMES.items():
+            st = stats([r["_orig"][c] for r in live_both])
+            mark = "  ← сейчас" if c == exit_col else ""
+            head.append(f"{name}: {st['mean']:+.3f}% · в плюс {st['win']:.0f}%{mark}")
     findings = []
     sections = []
     for gname, key in GROUPS:

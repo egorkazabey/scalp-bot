@@ -36,7 +36,7 @@ class Storage:
         # новые колонки для старых баз: обстановка сигнала и его виртуальный результат
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(signals)")}
         for col, typ in (("features", "TEXT"), ("result", "TEXT"), ("r_pct", "REAL"), ("closed_ts", "REAL"),
-                         ("r_be", "REAL")):
+                         ("r_be", "REAL"), ("r_near", "REAL"), ("r_both", "REAL")):
             if col not in cols:
                 self.db.execute(f"ALTER TABLE signals ADD COLUMN {col} {typ}")
         self.db.commit()
@@ -65,10 +65,11 @@ class Storage:
         ).fetchall()
 
     # ---------- виртуальный результат каждого сигнала ----------
-    def set_signal_result(self, sig_id, result, r_pct, r_be=None):
-        """r_pct: результат без безубытка, r_be: с безубытком."""
-        self.db.execute("UPDATE signals SET result=?, r_pct=?, r_be=?, closed_ts=? WHERE id=?",
-                        (result, r_pct, r_be, time.time(), sig_id))
+    def set_signal_result(self, sig_id, result, r_pct, r_be=None, r_near=None, r_both=None):
+        """Результат по вариантам выхода: r_pct просто стоп/тейк, r_be с безубытком,
+        r_near с выходом на втором подходе к стопу, r_both с обоими."""
+        self.db.execute("UPDATE signals SET result=?, r_pct=?, r_be=?, r_near=?, r_both=?, closed_ts=? "
+                        "WHERE id=?", (result, r_pct, r_be, r_near, r_both, time.time(), sig_id))
         self.db.commit()
 
     def open_virtual(self, since):
@@ -81,8 +82,9 @@ class Storage:
         self.db.execute("UPDATE signals SET result='lost' WHERE result IS NULL AND ts <= ?", (before,))
         self.db.commit()
 
-    def last_results(self, n, typ=None, symbol=None, since=0, be=False):
-        col = "COALESCE(r_be, r_pct)" if be else "r_pct"
+    def last_results(self, n, typ=None, symbol=None, since=0, col="r_pct"):
+        assert col in ("r_pct", "r_be", "r_near", "r_both")
+        col = f"COALESCE({col}, r_pct)"
         q = f"SELECT {col} FROM signals WHERE result IN ('tp','sl','time') AND ts >= ?"
         args = [since]
         if typ:
@@ -98,7 +100,7 @@ class Storage:
     def results(self, since=0):
         """Сигналы с результатом и обстановкой, для анализа."""
         rows = self.db.execute(
-            "SELECT id, ts, symbol, type, side, result, r_pct, r_be, features FROM signals "
+            "SELECT id, ts, symbol, type, side, result, r_pct, r_be, r_near, r_both, features FROM signals "
             "WHERE result IN ('tp','sl','time') AND ts >= ? ORDER BY id", (since,)).fetchall()
         out = []
         for r in rows:
