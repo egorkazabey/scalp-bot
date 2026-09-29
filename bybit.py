@@ -108,6 +108,14 @@ class BybitFeed:
         items = sorted(await self.market(min_turnover), key=lambda t: -t["turnover"])
         return [t["symbol"] for t in items[:n]]
 
+    async def fetch_klines(self, symbol, interval, limit=200):
+        s = await self.session()
+        params = {"category": "linear", "symbol": symbol, "interval": str(interval), "limit": limit}
+        async with s.get(f"{REST_URL}/v5/market/kline", params=params,
+                         timeout=aiohttp.ClientTimeout(total=20)) as r:
+            data = await r.json()
+        return data["result"]["list"]
+
     async def valid_symbols(self):
         items = await self.fetch_tickers()
         return {t["symbol"] for t in items}

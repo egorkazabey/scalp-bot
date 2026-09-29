@@ -6,6 +6,7 @@ import time
 from bybit import BybitFeed
 from config import TYPE_NAMES
 from detectors import LiqTracker, PriceHistory, VolumeTracker, WallTracker
+from chart import ChartState, parse_klines
 from paper import PaperTrader
 
 log = logging.getLogger("engine")
@@ -80,6 +81,7 @@ class Engine:
         self.virtual = {}    # монета -> {id сигнала: {...}}: каждый сигнал доводим до стопа/тейка виртуально
         self.limits = {}     # монета -> [лимитки, ждущие исполнения]
         self.confirms = {}   # монета -> [отскоки, ждущие подтверждения]
+        self.charts = {}     # монета -> ChartState (свечи 15м и 1ч)
         self._stale_alerted = False
 
     # ---------- жизненный цикл ----------
@@ -93,6 +95,7 @@ class Engine:
             asyncio.create_task(self._loop()),
             asyncio.create_task(self._slow_loop()),
             asyncio.create_task(self._auto_refresh()),
+            asyncio.create_task(self._chart_loop()),
         ]
 
     async def stop(self):
@@ -214,6 +217,22 @@ class Engine:
                     self.say("\n".join(msg))
             except Exception:
                 log.exception("auto refresh")
+
+    async def _chart_loop(self):
+        """Раз в 5 минут обновляем свечи по отслеживаемым монетам."""
+        await asyncio.sleep(5)
+        while True:
+            for sym in list(dict.fromkeys(self.symbols + ["BTCUSDT"])):
+                try:
+                    k15 = parse_klines(await self.feed.fetch_klines(sym, 15, 100))
+                    k60 = parse_klines(await self.feed.fetch_klines(sym, 60, 220))
+                    self.charts[sym] = ChartState(k15, k60)
+                except Exception as e:
+                    log.debug("klines %s: %s", sym, e)
+                await asyncio.sleep(0.2)
+            for sym in [s for s in self.charts if s not in self.symbols and s != "BTCUSDT"]:
+                del self.charts[sym]
+            await asyncio.sleep(300)
 
     def say(self, text, symbol=None):
         """symbol: к сообщению добавится кнопка с графиком этой монеты на Bybit."""
@@ -505,6 +524,13 @@ class Engine:
             f["vol_move"] = details.get("move")
         if "longs" in details:
             f["liq_usd"] = details["longs"] + details["shorts"]
+        # картина на графике: тренд, EMA, RSI, уровни суток
+        ch = self.charts.get(sym)
+        if ch:
+            try:
+                f.update(ch.features(price, side))
+            except Exception:
+                log.exception("chart features %s", sym)
         # совпадение факторов в пользу сделки
         conf = []
         if f.get("btc_dir") == "with":
@@ -698,6 +724,11 @@ class Engine:
                          (", ставка на откат" if typ == "volume_rev" else ", вход по импульсу"))
         elif t == "liq":
             lines.append(f"💥 Ликвидации за минуту: лонги {fusd(d['longs'])} · шорты {fusd(d['shorts'])}")
+        ch = self.charts.get(sig["symbol"])
+        if ch:
+            summ = ch.summary(pr)
+            if summ:
+                lines.append(f"🕯 График: {summ}")
         lines.append("")
         if trade:
             notional = trade["qty"] * trade["entry"]

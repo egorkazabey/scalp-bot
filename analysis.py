@@ -26,6 +26,32 @@ def _usd(v):
     return f"${v / 1e6:g}M" if v >= 1e6 else f"${v / 1e3:g}K"
 
 
+def _trend(r, key, flat):
+    """Тренд относительно направления сделки: по тренду, против, боковик."""
+    v = r["f"].get(key)
+    if v is None:
+        return None
+    if abs(v) < flat:
+        return "боковик"
+    return "по тренду" if (v > 0) == (r["side"] == "LONG") else "против тренда"
+
+
+def _levels(r):
+    """Где цена относительно максимума и минимума суток, с учётом направления сделки."""
+    hi, lo = r["f"].get("dist_hi"), r["f"].get("dist_lo")
+    if hi is None or lo is None:
+        return None
+    near = 0.7
+    long = r["side"] == "LONG"
+    at_support = (lo <= near) if long else (hi <= near)   # лонг от минимума, шорт от максимума
+    at_wall = (hi <= near) if long else (lo <= near)      # лонг в максимум, шорт в минимум
+    if at_support:
+        return "от уровня суток"
+    if at_wall:
+        return "в уровень суток"
+    return "середина диапазона"
+
+
 GROUPS = [
     ("Тип сигнала", lambda r: SHORT_NAMES.get(r["type"], r["type"])),
     ("Направление", lambda r: r["side"]),
@@ -50,6 +76,16 @@ GROUPS = [
     ("Глубина стакана ±1%", lambda r: _bucket(r["f"].get("depth"),
                                               [(5e5, "<$500K"), (2e6, "$0.5-2M"), (1e7, "$2-10M"),
                                                (None, "$10M+")], None)),
+    ("Тренд за 4ч", lambda r: _trend(r, "tr4h", 1.0)),
+    ("Тренд за 1ч", lambda r: _trend(r, "tr1h", 0.4)),
+    ("Цена и EMA200 (1ч)", lambda r: None if r["f"].get("ema200_1h") is None else
+        ("по тренду" if (r["f"]["ema200_1h"] == "above") == (r["side"] == "LONG") else "против тренда")),
+    ("Цена и EMA50 (1ч)", lambda r: None if r["f"].get("ema50_1h") is None else
+        ("по тренду" if (r["f"]["ema50_1h"] == "above") == (r["side"] == "LONG") else "против тренда")),
+    ("RSI 15м по сделке", lambda r: _bucket(r["f"].get("rsi_side"),
+                                           [(30, "<30 сильно против"), (45, "30-45"), (55, "45-55"), (70, "55-70"),
+                                            (None, "70+ сильно по")], None)),
+    ("Уровни суток", lambda r: _levels(r)),
     ("Совпало факторов", lambda r: None if r["f"].get("conf") is None else
         {0: "0", 1: "1", 2: "2"}.get(r["f"]["conf"], "3+")),
     ("Монета", lambda r: r["symbol"].replace("USDT", "")),
