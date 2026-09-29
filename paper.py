@@ -103,13 +103,15 @@ class PaperTrader:
     def on_price(self, symbol, price):
         """Проверка стопов/тейков. Возвращает закрытые сделки."""
         closed = []
+        # тейк это лимитка в очереди: одного касания мало, цена должна пройти сквозь уровень
+        through = self.s.get("tp_through_pct") / 100
         for tid, t in list(self.open.items()):
             if t["symbol"] != symbol:
                 continue
             long = t["side"] == "LONG"
             if (long and price <= t["sl"]) or (not long and price >= t["sl"]):
                 closed.append(self._close(tid, t["sl"], "стоп", slip=True))
-            elif (long and price >= t["tp"]) or (not long and price <= t["tp"]):
+            elif (long and price > t["tp"] * (1 + through)) or (not long and price < t["tp"] * (1 - through)):
                 # тейк стоит лимитным ордером: без проскальзывания и с мейкерской комиссией
                 closed.append(self._close(tid, t["tp"], "тейк", slip=False, maker=True))
         return closed

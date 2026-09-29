@@ -28,7 +28,7 @@ GROUPS = {
     "risk": ("💼 Риск и бумажная торговля", ["paper_enabled", "start_balance", "size_mode", "risk_pct",
                                             "margin_pct", "max_leverage",
                                             "rr", "sl_buffer_pct", "default_sl_pct", "min_sl_pct", "stop_pause_min", "max_hold_min",
-                                            "max_open", "daily_loss_pct", "fee_pct", "maker_fee_pct", "slippage_pct"]),
+                                            "max_open", "daily_loss_pct", "fee_pct", "maker_fee_pct", "slippage_pct", "tp_through_pct"]),
     "general": ("⚙️ Общее", ["cooldown_sec", "btc_filter", "btc_filter_pct"]),
 }
 FEED_KEYS = {"coin_mode", "auto_top_n", "movers_n", "auto_min_turnover", "max_coins", "ob_depth"}
