@@ -30,6 +30,14 @@ def main():
     from bot import TgBot
 
     os.makedirs(DATA_DIR, exist_ok=True)
+    # только одна копия бота на папку data: вторая копия считала бы лимиты сделок отдельно
+    import fcntl
+    lock = open(os.path.join(DATA_DIR, "bot.lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit("Бот уже запущен (скорее всего через systemd). Вторая копия не нужна: "
+                 "sudo systemctl status scalpbot")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
