@@ -33,11 +33,19 @@ def main():
     # только одна копия бота на папку data: вторая копия считала бы лимиты сделок отдельно
     import fcntl
     lock = open(os.path.join(DATA_DIR, "bot.lock"), "w")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        sys.exit("Бот уже запущен (скорее всего через systemd). Вторая копия не нужна: "
-                 "sudo systemctl status scalpbot")
+    # при обновлении на хостинге новая копия может стартовать раньше, чем остановится старая:
+    # ждём до 2 минут, пока старая освободит блокировку, и только потом сдаёмся
+    for attempt in range(60):
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if attempt == 0:
+                print("Другая копия бота ещё работает, жду, пока она остановится...", flush=True)
+            time.sleep(2)
+    else:
+        sys.exit("Бот уже запущен в другой копии, вторая не нужна. "
+                 "Остановите старую копию (на VPS: sudo systemctl status scalpbot)")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
