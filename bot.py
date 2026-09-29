@@ -12,7 +12,7 @@ from telegram.error import RetryAfter, TelegramError
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes,
                           MessageHandler, filters)
 
-from config import PARAMS, SIGNAL_TYPES
+from config import PARAMS, SIGNAL_TYPES, TYPE_NAMES
 from engine import Engine, fdur, fp, fusd
 from paper import today_start
 
@@ -22,12 +22,12 @@ GROUPS = {
     "coins": ("🪙 Монеты и стакан", ["coin_mode", "auto_top_n", "movers_n", "auto_min_turnover", "max_coins",
                                     "refresh_min", "ob_depth", "min_book_usd"]),
     "scale": ("📐 Автоподстройка порогов", ["auto_scale", "wall_share_pct", "liq_turnover_pct"]),
-    "walls": ("🧱 Плотности", ["min_wall_usd", "wall_mult", "wall_max_dist_pct", "max_walls_side", "min_wall_age_sec",
+    "walls": ("🧱 Плотности", ["breakout_mode", "min_wall_usd", "wall_mult", "wall_max_dist_pct", "max_walls_side", "min_wall_age_sec",
                               "min_trust", "approach_pct"]),
-    "flow": ("📊 Объём и ликвидации", ["vol_mult", "vol_min_move_pct", "vol_min_usd", "liq_usd", "liq_mode"]),
+    "flow": ("📊 Объём и ликвидации", ["volume_mode", "vol_mult", "vol_min_move_pct", "vol_min_usd", "liq_usd", "liq_mode"]),
     "risk": ("💼 Риск и бумажная торговля", ["paper_enabled", "start_balance", "size_mode", "risk_pct",
                                             "margin_pct", "max_leverage",
-                                            "rr", "sl_buffer_pct", "default_sl_pct", "max_hold_min",
+                                            "rr", "sl_buffer_pct", "default_sl_pct", "min_sl_pct", "stop_pause_min", "max_hold_min",
                                             "max_open", "daily_loss_pct", "fee_pct", "maker_fee_pct", "slippage_pct"]),
     "general": ("⚙️ Общее", ["cooldown_sec", "btc_filter", "btc_filter_pct"]),
 }
@@ -296,7 +296,7 @@ class TgBot:
                 d[1] += t["pnl"] > 0
                 d[2] += t["pnl"]
             for k, (n, w, p) in by.items():
-                lines.append(f"  {SIGNAL_TYPES.get(k, k)}: {n} сд., {w / n * 100:.0f}% плюс, {p:+.2f}$")
+                lines.append(f"  {TYPE_NAMES.get(k, k)}: {n} сд., {w / n * 100:.0f}% плюс, {p:+.2f}$")
         else:
             lines.append("Закрытых сделок пока нет.")
         lines += ["", "<b>Сигналы: средний ход цены в сторону сигнала</b>"]
@@ -306,7 +306,7 @@ class TgBot:
                 def avg(a):
                     return f"{sum(a) / len(a):+.2f}%" if a else "-"
                 pos5 = f"{sum(1 for x in d['m5'] if x > 0) / len(d['m5']) * 100:.0f}%" if d["m5"] else "-"
-                lines.append(f"{SIGNAL_TYPES.get(k, k)} ({d['n']}): 1м {avg(d['m1'])} · 5м {avg(d['m5'])} · "
+                lines.append(f"{TYPE_NAMES.get(k, k)} ({d['n']}): 1м {avg(d['m1'])} · 5м {avg(d['m5'])} · "
                              f"15м {avg(d['m15'])} · в плюс через 5м: {pos5}")
         else:
             lines.append("Сигналов пока нет.")
@@ -363,7 +363,7 @@ class TgBot:
                 mv = (r["p5"] / r["price"] - 1) * 100 * (1 if r["side"] == "LONG" else -1)
                 res = f" · 5м: {mv:+.2f}%"
             t = time.strftime("%d.%m %H:%M", time.localtime(r["ts"]))
-            lines.append(f"{icon} {t} {r['symbol']} {SIGNAL_TYPES.get(r['type'], r['type'])} @ {fp(r['price'])}{res}")
+            lines.append(f"{icon} {t} {r['symbol']} {TYPE_NAMES.get(r['type'], r['type'])} @ {fp(r['price'])}{res}")
         return "\n".join(lines)
 
     # ---------- команды ----------

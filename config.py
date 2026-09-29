@@ -34,11 +34,14 @@ PARAMS = {
     "min_wall_age_sec": (30,       int,   "Мин. время жизни плотности до сигнала, сек"),
     "min_trust":        (55,       int,   "Мин. рейтинг доверия плотности (0-100)"),
     "approach_pct":     (0.15,     float, "На каком расстоянии до плотности давать сигнал отскока, %"),
+    "breakout_mode":    ("fade",   str,   "Пробой: fade (против, ставка на ложный пробой) или follow (по пробою)"),
 
     # --- объём ---
     "vol_mult":         (4.0,      float, "Всплеск объёма: во сколько раз минутный объём выше среднего"),
     "vol_min_move_pct": (0.4,      float, "Всплеск объёма: мин. движение цены за минуту, %"),
     "vol_min_usd":      (500_000,  float, "Всплеск объёма: мин. объём за минуту в $"),
+
+    "volume_mode":      ("reversal", str, "Всплеск объёма: reversal (против импульса) или momentum (по импульсу)"),
 
     # --- ликвидации ---
     "liq_usd":          (250_000,  float, "Ликвидации: мин. сумма за 60 сек в $"),
@@ -55,6 +58,8 @@ PARAMS = {
     "rr":               (2.0,      float, "Соотношение прибыль/риск для тейка"),
     "sl_buffer_pct":    (0.1,      float, "Стоп за плотностью с запасом, %"),
     "default_sl_pct":   (0.35,     float, "Стоп для сигналов без плотности, %"),
+    "min_sl_pct":       (0.35,     float, "Стоп не ближе N% от входа: чтобы шум и комиссия не выбивали сделки"),
+    "stop_pause_min":   (30,       int,   "После стопа не открывать бумажные сделки по этой монете N минут"),
     "max_hold_min":     (30,       int,   "Закрыть бумажную сделку через N минут"),
     "max_open":         (3,        int,   "Макс. одновременных бумажных сделок"),
     "daily_loss_pct":   (5.0,      float, "Стоп на день: при убытке больше N% новые сделки не открываются"),
@@ -81,6 +86,13 @@ SETTINGS_VERSION = 2
 MIGRATIONS = {
     2: [("ob_depth", 200, 1000), ("wall_mult", 6.0, 4.0), ("auto_min_turnover", 50_000_000, 20_000_000)],
 }
+
+# названия для статистики: у пробоя и объёма есть вариант «против сигнала»,
+# его статистика считается отдельно
+TYPE_NAMES = dict(SIGNAL_TYPES, **{
+    "breakout_fade": "Ложный пробой (против)",
+    "volume_rev": "Откат после импульса (против)",
+})
 
 DEFAULT_STATE = {
     "version": SETTINGS_VERSION,
@@ -125,6 +137,10 @@ def _validate(key, val):
         raise ValueError("manual, auto, movers или mix")
     if key == "size_mode" and val not in ("risk", "margin"):
         raise ValueError("risk или margin")
+    if key == "breakout_mode" and val not in ("fade", "follow"):
+        raise ValueError("fade или follow")
+    if key == "volume_mode" and val not in ("reversal", "momentum"):
+        raise ValueError("reversal или momentum")
     if key == "liq_mode" and val not in ("reversal", "momentum"):
         raise ValueError("reversal или momentum")
     if key == "ob_depth" and val not in (50, 200, 1000):

@@ -4,7 +4,7 @@ import logging
 import time
 
 from bybit import BybitFeed
-from config import SIGNAL_TYPES
+from config import TYPE_NAMES
 from detectors import LiqTracker, PriceHistory, VolumeTracker, WallTracker
 from paper import PaperTrader
 
@@ -74,6 +74,7 @@ class Engine:
         self.coin_tags = {}  # монета -> почему она в списке (свой / объём / рост / падение)
         self._picks = {}     # прошлый выбор по каждой категории, для устойчивости списка
         self.depth = {}      # монета -> глубина стакана в пределах 1% (меньшая из сторон), $
+        self.stop_block = {} # монета -> время последнего стопа (пауза по монете)
         self._stale_alerted = False
 
     # ---------- жизненный цикл ----------
@@ -270,8 +271,15 @@ class Engine:
                     continue
                 side = "LONG" if w.side == "ask" else "SHORT"
                 buf = p("sl_buffer_pct") / 100
-                sl = w.price * (1 - buf) if side == "LONG" else w.price * (1 + buf)
-                self.emit(sym, "breakout", side, last, sl, {
+                typ = "breakout"
+                if p("breakout_mode") == "fade":
+                    # ставка на ложный пробой: входим против, стоп по минимальному расстоянию
+                    side = "SHORT" if side == "LONG" else "LONG"
+                    typ = "breakout_fade"
+                    sl = last * (1 - buf) if side == "LONG" else last * (1 + buf)
+                else:
+                    sl = w.price * (1 - buf) if side == "LONG" else w.price * (1 + buf)
+                self.emit(sym, typ, side, last, sl, {
                     "wall_price": w.price, "wall_usd": w.max_usd, "age": w.age(now),
                     "eaten_usd": w.traded_usd, "trust": w.trust(now),
                 })
@@ -307,9 +315,13 @@ class Engine:
                 if (avg > 0 and vol >= p("vol_min_usd") and vol >= p("vol_mult") * avg
                         and abs(move) >= p("vol_min_move_pct")):
                     side = "LONG" if move > 0 else "SHORT"
+                    typ = "volume"
+                    if p("volume_mode") == "reversal":
+                        side = "SHORT" if side == "LONG" else "LONG"
+                        typ = "volume_rev"
                     d = p("default_sl_pct") / 100
                     sl = last * (1 - d) if side == "LONG" else last * (1 + d)
-                    self.emit(sym, "volume", side, last, sl, {"vol": vol, "avg": avg, "move": move})
+                    self.emit(sym, typ, side, last, sl, {"vol": vol, "avg": avg, "move": move})
 
         # каскад ликвидаций
         if on["liq"]:
@@ -339,8 +351,8 @@ class Engine:
         key = (sym, typ, side)
         if now - self.cooldown.get(key, 0) < self.s.get("cooldown_sec", sym):
             return
-        # стоп не ближе 0.1%, иначе комиссия съест всё
-        min_d = 0.001
+        # стоп не ближе min_sl_pct: иначе шум и комиссия выбивают сделку
+        min_d = max(self.eff("min_sl_pct", sym), 0.1) / 100
         if side == "LONG":
             sl = min(sl, price * (1 - min_d))
         else:
@@ -361,8 +373,12 @@ class Engine:
         sig = {"ts": now, "symbol": sym, "type": typ, "side": side, "price": price,
                "sl": sl, "tp": tp, "details": details}
         sig["id"] = self.db.add_signal(sig)
-        trade, why = self.paper.try_open(sig, sig["id"], book=self.feed.books.get(sym))
-        if self.s["notify"].get(typ, True):
+        pause_left = self.stop_block.get(sym, 0) + self.s.get("stop_pause_min") * 60 - now
+        if pause_left > 0:
+            trade, why = None, f"пауза по монете после стопа, ещё {fdur(pause_left)}"
+        else:
+            trade, why = self.paper.try_open(sig, sig["id"], book=self.feed.books.get(sym))
+        if self.s["notify"].get(typ.split("_")[0], True):
             self.say(self._fmt_signal(sig, trade, why))
 
     def _fmt_signal(self, sig, trade, why):
@@ -370,15 +386,17 @@ class Engine:
         icon = "🟢" if sig["side"] == "LONG" else "🔴"
         pr = sig["price"]
         lines = [
-            f"{icon} <b>{sig['side']} {sig['symbol']}</b> · {SIGNAL_TYPES[sig['type']]}",
+            f"{icon} <b>{sig['side']} {sig['symbol']}</b> · {TYPE_NAMES.get(sig['type'], sig['type'])}",
             f"Цена: <code>{fp(pr)}</code>",
         ]
-        t = sig["type"]
+        t = sig["type"].split("_")[0]
         if t in ("bounce", "breakout"):
             if t == "bounce":
                 side_name = "bid" if sig["side"] == "LONG" else "ask"
             else:
                 side_name = "ask" if sig["side"] == "LONG" else "bid"
+                if sig["type"] == "breakout_fade":
+                    side_name = "bid" if sig["side"] == "LONG" else "ask"
             lines.append(f"Плотность: <code>{fp(d['wall_price'])}</code> {side_name}, {fusd(d['wall_usd'])}, "
                          f"живёт {fdur(d['age'])}")
             extra = f"доверие {d['trust']}/100"
@@ -409,6 +427,8 @@ class Engine:
         return "\n".join(lines)
 
     def _fmt_close(self, t):
+        if t.get("reason") == "стоп":
+            self.stop_block[t["symbol"]] = time.time()
         icon = "✅" if t["pnl"] > 0 else "❌"
         pct = (t["exit"] / t["entry"] - 1) * 100 * (1 if t["side"] == "LONG" else -1)
         return (f"{icon} Сделка #{t['id']} {t['side']} {t['symbol']} закрыта ({t['reason']})\n"
