@@ -172,11 +172,18 @@ def analyze(rows, min_n=15, title="всё время", exit_col="r_pct"):
             st = stats(rs)
             if st["n"] < min_n:
                 continue
-            diff = st["mean"] - base["mean"]
+            # сравниваем с остальными сигналами этой же группы (у которых признак тоже записан),
+            # а не со всеми сигналами: иначе новые признаки, которые есть только у свежих сигналов,
+            # сравнивались бы со старым периодом
+            rest = [x for bb, xs in buckets.items() if bb != b for x in xs]
+            other = stats(rest) if len(rest) >= min_n else None
             mark = "  "
-            if st["se"] and abs(diff) > 2 * st["se"]:
-                mark = " ✅" if diff > 0 else " ❌"
-                findings.append((abs(diff), diff, gname, b, st))
+            if other:
+                diff = st["mean"] - other["mean"]
+                se = (st["se"] ** 2 + other["se"] ** 2) ** 0.5
+                if se and abs(diff) > 2 * se:
+                    mark = " ✅" if diff > 0 else " ❌"
+                    findings.append((abs(diff), diff, gname, b, st, other))
             table.append(html.escape(f"{str(b)[:18]:<18} {st['n']:>4} {st['win']:>4.0f}% {st['mean']:>+7.3f}%")
                          + mark)
         if table:
@@ -187,12 +194,13 @@ def analyze(rows, min_n=15, title="всё время", exit_col="r_pct"):
     if findings:
         findings.sort(reverse=True)
         fl = ["", "<b>Главные выводы</b>"]
-        for _, diff, g, b, st in findings[:8]:
+        for _, diff, g, b, st, other in findings[:8]:
             icon = "✅" if diff > 0 else "❌"
-            verdict = "лучше среднего" if diff > 0 else "хуже среднего"
-            fl.append(f"{icon} <b>{html.escape(g)}: {html.escape(str(b))}</b>\n    {verdict}, {st['mean']:+.3f}% на сделку "
-                      f"({st['n']} сигналов, в плюс {st['win']:.0f}%)")
-        fl.append("<i>Показаны только отличия, которые вряд ли случайны.</i>")
+            fl.append(f"{icon} <b>{html.escape(g)}: {html.escape(str(b))}</b>\n"
+                      f"    {st['mean']:+.3f}% на сделку ({st['n']} сигналов, в плюс {st['win']:.0f}%), "
+                      f"у остальных {other['mean']:+.3f}%")
+        fl.append("<i>Каждая группа сравнивается с остальными сигналами, где этот признак записан. "
+                  "Показаны только отличия, которые вряд ли случайны.</i>")
         out += "\n" + "\n".join(fl)
     else:
         need = "" if base["n"] >= min_n * 4 else f" Нужно хотя бы ~{min_n * 4} сигналов."
