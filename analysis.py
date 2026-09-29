@@ -50,6 +50,8 @@ GROUPS = [
     ("Глубина стакана ±1%", lambda r: _bucket(r["f"].get("depth"),
                                               [(5e5, "<$500K"), (2e6, "$0.5-2M"), (1e7, "$2-10M"),
                                                (None, "$10M+")], None)),
+    ("Совпало факторов", lambda r: None if r["f"].get("conf") is None else
+        {0: "0", 1: "1", 2: "2"}.get(r["f"]["conf"], "3+")),
     ("Монета", lambda r: r["symbol"].replace("USDT", "")),
 ]
 
@@ -70,8 +72,18 @@ def _pf(v):
     return "∞" if v == float("inf") else f"{v:.2f}"
 
 
-def analyze(rows, min_n=15, title="всё время"):
-    """Возвращает список сообщений (Telegram ограничивает длину)."""
+def analyze(rows, min_n=15, title="всё время", use_be=False):
+    """Возвращает список сообщений (Telegram ограничивает длину).
+    Тип сигнала сравниваем по всем вариантам (включая виртуальные способы входа),
+    остальные группы только по сигналам, которые реально торговались бы."""
+    # безубыток: берём результат выбранного варианта выхода
+    both = [r for r in rows if r["r_pct"] is not None and r.get("r_be") is not None]
+    for r in rows:
+        r["_r_base"] = r["r_pct"]
+        if use_be and r.get("r_be") is not None:
+            r["r_pct"] = r["r_be"]
+    all_rows = rows
+    rows = [r for r in rows if not r["f"].get("shadow")]
     all_r = [r["r_pct"] for r in rows if r["r_pct"] is not None]
     base = stats(all_r)
     if not base:
@@ -84,11 +96,17 @@ def analyze(rows, min_n=15, title="всё время"):
         f"профит-фактор <b>{_pf(base['pf'])}</b>",
         "<i>Каждый сигнал проверяется как сделка до стопа, тейка или таймаута, с комиссиями.</i>",
     ]
+    live_both = [r for r in both if not r["f"].get("shadow")]
+    if len(live_both) >= min_n:
+        b0 = stats([r["_r_base"] for r in live_both])
+        b1 = stats([r["r_be"] for r in live_both])
+        head.append(f"\n⚪ <b>Безубыток</b> ({'включён' if use_be else 'выключен'}): с ним {b1['mean']:+.3f}% "
+                    f"на сделку, без него {b0['mean']:+.3f}%")
     findings = []
     sections = []
     for gname, key in GROUPS:
         buckets = {}
-        for r in rows:
+        for r in (all_rows if gname == "Тип сигнала" else rows):
             if r["r_pct"] is None:
                 continue
             b = key(r)

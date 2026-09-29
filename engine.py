@@ -78,6 +78,8 @@ class Engine:
         self.depth = {}      # монета -> глубина стакана в пределах 1% (меньшая из сторон), $
         self.stop_block = {} # монета -> время последнего стопа (пауза по монете)
         self.virtual = {}    # монета -> {id сигнала: {...}}: каждый сигнал доводим до стопа/тейка виртуально
+        self.limits = {}     # монета -> [лимитки, ждущие исполнения]
+        self.confirms = {}   # монета -> [отскоки, ждущие подтверждения]
         self._stale_alerted = False
 
     # ---------- жизненный цикл ----------
@@ -239,6 +241,8 @@ class Engine:
         for ts, price, qty, _side in trades:
             if virt:
                 self._check_virtual(sym, price)
+            if self.limits.get(sym):
+                self._check_limits(sym, price)
             usd = price * qty
             self.vol[sym].add(ts, price, usd)
             self.walls[sym].on_trade(price, usd, touch)
@@ -313,10 +317,23 @@ class Engine:
                     side = "LONG" if w.side == "bid" else "SHORT"
                     buf = p("sl_buffer_pct") / 100
                     sl = w.price * (1 - buf) if side == "LONG" else w.price * (1 + buf)
-                    self.emit(sym, "bounce", side, last, sl, {
-                        "wall_price": w.price, "wall_usd": w.usd, "age": w.age(now), "ratio": w.ratio,
-                        "trust": trust, "moves": w.moves, "eaten_usd": w.traded_usd,
-                    })
+                    details = {"wall_price": w.price, "wall_usd": w.usd, "age": w.age(now), "ratio": w.ratio,
+                               "trust": trust, "moves": w.moves, "eaten_usd": w.traded_usd}
+                    live = p("bounce_entry")
+                    # все три способа входа проверяются, торгует только выбранный, остальные виртуально
+                    self.emit(sym, "bounce", side, last, sl, details, shadow=(live != "touch"))
+                    off = p("limit_offset_pct") / 100
+                    self.limits.setdefault(sym, []).append({
+                        "typ": "bounce_limit", "side": side, "shadow": live != "limit",
+                        "price": w.price * (1 + off) if side == "LONG" else w.price * (1 - off),
+                        "sl": sl, "wall": (w.side, w.price), "placed": now,
+                        "expires": now + p("entry_wait_sec"), "details": dict(details)})
+                    self.confirms.setdefault(sym, []).append({
+                        "side": side, "shadow": live != "confirm", "wall": (w.side, w.price), "sl": sl,
+                        "eaten0": w.traded_usd, "t0": now, "expires": now + p("confirm_window_sec"),
+                        "details": dict(details)})
+
+        self._check_pending(sym, tracker, mid, last, now, p)
 
         # всплеск объёма
         if on["volume"]:
@@ -355,7 +372,9 @@ class Engine:
         d = self.depth.get(sym)
         return d is not None and d < self.eff("min_book_usd", sym)
 
-    def emit(self, sym, typ, side, price, sl, details):
+    def emit(self, sym, typ, side, price, sl, details, shadow=False, maker_entry=False):
+        """shadow: вариант проверяется только виртуально (без сделки и уведомления).
+        maker_entry: вход лимиткой (комиссия мейкера, без проскальзывания)."""
         if self.s["paused"] or self.thin(sym):
             return
         now = time.time()
@@ -383,23 +402,76 @@ class Engine:
         tp = price + rr * risk if side == "LONG" else price - rr * risk
         sig = {"ts": now, "symbol": sym, "type": typ, "side": side, "price": price,
                "sl": sl, "tp": tp, "details": details}
-        sig["features"] = self._features(sym, typ, side, price, sl, details, now)
+        f = sig["features"] = self._features(sym, typ, side, price, sl, details, now)
+        if shadow:
+            f["shadow"] = 1
+        if maker_entry:
+            f["maker"] = 1
+        blocked = self._filter_reason(sym, f)
+        if blocked:
+            f["filtered"] = blocked
         sig["id"] = self.db.add_signal(sig)
         # каждый сигнал доводим до стопа/тейка виртуально: так результат есть по всем сигналам,
         # даже если бумажная сделка не открылась, и по ним учится автопауза и /analyze
         self.virtual.setdefault(sym, {})[sig["id"]] = {
             "id": sig["id"], "ts": now, "symbol": sym, "type": typ, "side": side,
-            "price": price, "sl": sl, "tp": tp}
-        paused = self.auto_paused(typ, sym)
-        if paused:
+            "price": price, "sl": sl, "tp": tp, "maker": maker_entry, "be_sl": None, "res": {}}
+        if shadow or blocked or self.auto_paused(typ, sym):
             return  # сигнал записан и сопровождается виртуально, но без сделки и уведомления
         pause_left = self.stop_block.get(sym, 0) + self.s.get("stop_pause_min") * 60 - now
         if pause_left > 0:
             trade, why = None, f"пауза по монете после стопа, ещё {fdur(pause_left)}"
         else:
-            trade, why = self.paper.try_open(sig, sig["id"], book=self.feed.books.get(sym))
+            trade, why = self.paper.try_open(sig, sig["id"], book=self.feed.books.get(sym),
+                                             maker_entry=maker_entry)
         if self.s["notify"].get(typ.split("_")[0], True):
             self.say(self._fmt_signal(sig, trade, why))
+
+    # ---------- лимитки и подтверждения ----------
+    def _check_limits(self, sym, price):
+        """Лимитка исполняется, когда цена прошла сквозь её уровень (одного касания мало: очередь)."""
+        keep = []
+        for o in self.limits.get(sym, []):
+            long = o["side"] == "LONG"
+            if (long and price < o["price"]) or (not long and price > o["price"]):
+                d = dict(o["details"], waited=time.time() - o["placed"])
+                self.emit(sym, o["typ"], o["side"], o["price"], o["sl"], d,
+                          shadow=o["shadow"], maker_entry=True)
+            else:
+                keep.append(o)
+        self.limits[sym] = keep
+
+    def _check_pending(self, sym, tracker, mid, last, now, p):
+        # лимитки: отмена по времени или если плотность исчезла
+        self.limits[sym] = [o for o in self.limits.get(sym, [])
+                            if now < o["expires"] and o["wall"] in tracker.walls]
+        # подтверждение отскока: плотность выдержала удар и цена пошла назад
+        keep = []
+        for c in self.confirms.get(sym, []):
+            w = tracker.walls.get(c["wall"])
+            if w is None or now >= c["expires"]:
+                continue
+            away = ((mid - w.price) / w.price if c["side"] == "LONG" else (w.price - mid) / w.price) * 100
+            eaten = w.traded_usd - c["eaten0"]
+            if eaten >= w.max_usd * p("confirm_eat_pct") / 100 and away >= p("confirm_move_pct"):
+                d = dict(c["details"], confirm_sec=now - c["t0"], eaten_after=eaten, trust=w.trust(now))
+                self.emit(sym, "bounce_confirm", c["side"], last, c["sl"], d, shadow=c["shadow"])
+            else:
+                keep.append(c)
+        self.confirms[sym] = keep
+
+    def _filter_reason(self, sym, f):
+        """Фильтры из выводов анализа. Отфильтрованный сигнал всё равно проверяется виртуально."""
+        mx = self.eff("max_depth_usd", sym)
+        if mx and f.get("depth") and f["depth"] > mx:
+            return "крупная монета с очень глубоким стаканом"
+        mn = self.eff("min_coin_move_pct", sym)
+        if mn and f.get("chg24") is not None and abs(f["chg24"]) < mn:
+            return "монета почти не двигается за сутки"
+        mc = self.eff("min_confluence", sym)
+        if mc and f.get("conf", 0) < mc:
+            return f"совпало факторов {f.get('conf', 0)} из нужных {mc}"
+        return None
 
     # ---------- обучение: обстановка, виртуальный результат, автопауза ----------
     def _features(self, sym, typ, side, price, sl, details, now):
@@ -432,34 +504,80 @@ class Engine:
             f["vol_move"] = details.get("move")
         if "longs" in details:
             f["liq_usd"] = details["longs"] + details["shorts"]
+        # совпадение факторов в пользу сделки
+        conf = []
+        if f.get("btc_dir") == "with":
+            conf.append("btc")
+        vr = self.vol[sym].check(now) if sym in self.vol else None
+        if vr and vr[1] > 0 and vr[0] >= 2 * vr[1]:
+            conf.append("volume")
+        if sym in self.liq:
+            lg, sh = self.liq[sym].check(now)
+            if lg + sh >= 0.3 * self.eff("liq_usd", sym):
+                conf.append("liq")
+        if details.get("ratio", 0) >= 20:
+            conf.append("wall")
+        elif sym in self.walls:
+            want = "bid" if side == "LONG" else "ask"
+            if any(w.side == want and abs(w.price / price - 1) <= 0.005 for w in self.walls[sym].walls.values()):
+                conf.append("wall")
+        f["conf"] = len(conf)
+        f["conf_list"] = conf
         return f
 
     def _virtual_r(self, v, exit_price, result):
         """Итог виртуальной сделки в % от позиции, с комиссиями и проскальзыванием."""
         sign = 1 if v["side"] == "LONG" else -1
         slip = self.s.get("slippage_pct") / 100
-        entry = v["price"] * (1 + sign * slip)
         fee = self.s.get("fee_pct")
+        maker = self.s.get("maker_fee_pct")
+        entry = v["price"] if v.get("maker") else v["price"] * (1 + sign * slip)
+        fees = maker if v.get("maker") else fee
         if result == "tp":
-            fees = fee + self.s.get("maker_fee_pct")
+            fees += maker
         else:
             exit_price = exit_price * (1 - sign * slip)
-            fees = 2 * fee
+            fees += fee
         return sign * (exit_price / entry - 1) * 100 - fees
 
     def _check_virtual(self, sym, price):
         through = self.s.get("tp_through_pct") / 100
+        trig = self.s.get("be_trigger")
         for sid, v in list(self.virtual.get(sym, {}).items()):
             long = v["side"] == "LONG"
-            if (long and price <= v["sl"]) or (not long and price >= v["sl"]):
-                self._finish_virtual(v, v["sl"], "sl")
-            elif (long and price > v["tp"] * (1 + through)) or (not long and price < v["tp"] * (1 - through)):
-                self._finish_virtual(v, v["tp"], "tp")
+            res = v.setdefault("res", {})
+            tp_hit = (long and price > v["tp"] * (1 + through)) or (not long and price < v["tp"] * (1 - through))
+            # без безубытка
+            if "base" not in res:
+                if (long and price <= v["sl"]) or (not long and price >= v["sl"]):
+                    res["base"] = ("sl", v["sl"])
+                elif tp_hit:
+                    res["base"] = ("tp", v["tp"])
+            # с безубытком
+            if "be" not in res:
+                if v.get("be_sl") is None:
+                    span = v["tp"] - v["price"]
+                    if span and (price - v["price"]) / span >= trig:
+                        v["be_sl"] = self.paper.be_price(
+                            v["price"], v["side"], self.s.get("maker_fee_pct") if v.get("maker") else None)
+                stop = v["be_sl"] if v.get("be_sl") is not None else v["sl"]
+                if (long and price <= stop) or (not long and price >= stop):
+                    res["be"] = ("sl", stop)
+                elif tp_hit:
+                    res["be"] = ("tp", v["tp"])
+            if "base" in res and "be" in res:
+                self._finish_virtual(v)
 
-    def _finish_virtual(self, v, exit_price, result):
+    def _finish_virtual(self, v, price=None):
+        res = v.setdefault("res", {})
+        for leg in ("base", "be"):
+            if leg not in res and price:
+                res[leg] = ("time", price)
         self.virtual.get(v["symbol"], {}).pop(v["id"], None)
-        r = self._virtual_r(v, exit_price, result)
-        self.db.set_signal_result(v["id"], result, r)
+        rb, eb = res["base"]
+        r_base = self._virtual_r(v, eb, rb)
+        r_be = self._virtual_r(v, res["be"][1], res["be"][0])
+        self.db.set_signal_result(v["id"], rb, r_base, r_be)
         if self.s.get("auto_pause"):
             self._update_pauses(v["type"], v["symbol"])
 
@@ -470,7 +588,7 @@ class Engine:
                 if now - v["ts"] >= limit:
                     px = self.price(sym)
                     if px:
-                        self._finish_virtual(v, px, "time")
+                        self._finish_virtual(v, px)
                     elif now - v["ts"] >= limit * 3:
                         d.pop(sid, None)
                         self.db.set_signal_result(sid, "lost", None)
@@ -500,7 +618,7 @@ class Engine:
         for key, name, win, flt, bad_avg, bad_pf in checks:
             if key not in ap:
                 since = self.s["pause_reset"].get(key, 0)
-                n, avg, pf = self._perf(self.db.last_results(win, since=since, **flt))
+                n, avg, pf = self._perf(self.db.last_results(win, since=since, be=self.s.get("breakeven"), **flt))
                 if n >= win and avg < bad_avg and pf < bad_pf:
                     why = f"последние {n} сигналов: в среднем {avg:+.2f}% на сделку, профит-фактор {pf:.2f}"
                     ap[key] = {"since": time.time(), "why": why}
@@ -514,7 +632,8 @@ class Engine:
                 # возвращаем, когда свежая половина окна (собранная уже во время паузы) в плюсе
                 half = max(5, win // 2)
                 since = ap[key]["since"]
-                rs = [r["r_pct"] for r in self.db.results(since=since)
+                col = "r_be" if self.s.get("breakeven") else "r_pct"
+                rs = [(r[col] if r[col] is not None else r["r_pct"]) for r in self.db.results(since=since)
                       if (flt.get("typ") in (None, r["type"])) and (flt.get("symbol") in (None, r["symbol"]))]
                 n, avg, pf = self._perf(rs[-half:])
                 if n >= half and avg > 0.02 and pf > 1.1:
@@ -557,6 +676,11 @@ class Engine:
                 lines.append(f"🧱 Съели плотность {kind} {wall}, цена прошла " + ("вверх" if up else "вниз"))
                 if typ == "breakout_fade":
                     lines.append("ставка на ложный пробой: возврат " + ("вниз" if up else "вверх"))
+            if typ == "bounce_limit":
+                lines.append(f"📌 Вошли лимиткой у плотности, ждали {fdur(d.get('waited', 0))}")
+            elif typ == "bounce_confirm":
+                lines.append(f"✔️ Плотность выдержала: съели {fusd(d.get('eaten_after', 0))}, "
+                             f"цена пошла назад через {fdur(d.get('confirm_sec', 0))}")
             info = [fusd(d["wall_usd"])]
             if d.get("eaten_usd"):
                 info.append(f"съели {fusd(d['eaten_usd'])}")
@@ -578,7 +702,8 @@ class Engine:
             notional = trade["qty"] * trade["entry"]
             lev = self.s.get("max_leverage")
             fee = self.s.get("fee_pct") / 100
-            risk = (abs(trade["entry"] - trade["sl"]) * trade["qty"] + notional * (2 * fee)
+            entry_fee = trade.get("entry_fee_pct", self.s.get("fee_pct")) / 100
+            risk = (abs(trade["entry"] - trade["sl"]) * trade["qty"] + notional * (entry_fee + fee)
                     + trade["sl"] * trade["qty"] * self.s.get("slippage_pct") / 100)
             lines.append(f"📝 Сделка #{trade['id']} · позиция {fusd(notional)} · залог {fusd(notional / lev)} ×{lev:g}")
             lines.append(f"Риск на стопе ≈ {fusd(risk)} с комиссиями")
@@ -590,7 +715,7 @@ class Engine:
     def _fmt_close(self, t):
         if t.get("reason") == "стоп":
             self.stop_block[t["symbol"]] = time.time()
-        icon = {"тейк": "✅", "стоп": "❌", "время": "⏱", "вручную": "✋"}.get(t["reason"], "•")
+        icon = {"тейк": "✅", "стоп": "❌", "время": "⏱", "вручную": "✋", "безубыток": "⚪"}.get(t["reason"], "•")
         if t["reason"] in ("время", "вручную"):
             icon = ("✅ " if t["pnl"] > 0 else "❌ ") + icon
         pct = (t["exit"] / t["entry"] - 1) * 100 * (1 if t["side"] == "LONG" else -1)

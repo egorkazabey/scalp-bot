@@ -28,15 +28,18 @@ GROUPS = {
                                       "liq_mode", "liq_usd", "liq_turnover_pct", "auto_scale"]),
     "size": ("💼 Размер сделки", ["paper_enabled", "start_balance", "size_mode", "risk_pct", "margin_pct",
                                  "max_leverage", "rr"]),
+    "entry": ("🎯 Вход и выход", ["bounce_entry", "limit_offset_pct", "entry_wait_sec", "confirm_window_sec",
+                                  "confirm_move_pct", "confirm_eat_pct", "breakeven", "be_trigger"]),
+    "filters": ("🔍 Фильтры", ["max_depth_usd", "min_coin_move_pct", "min_confluence", "btc_filter",
+                              "btc_filter_pct"]),
     "protect": ("🛡 Защита", ["min_sl_pct", "sl_buffer_pct", "default_sl_pct", "max_hold_min", "max_open",
-                             "max_same_side", "stop_pause_min", "daily_loss_pct", "cooldown_sec",
-                             "btc_filter", "btc_filter_pct"]),
+                             "max_same_side", "stop_pause_min", "daily_loss_pct", "cooldown_sec"]),
     "fees": ("🧾 Комиссии", ["fee_pct", "maker_fee_pct", "slippage_pct", "tp_through_pct"]),
     "learn": ("🧠 Обучение", ["auto_pause", "pause_window", "pause_coin_window", "analyze_min"]),
 }
 FEED_KEYS = {"coin_mode", "auto_top_n", "movers_n", "auto_min_turnover", "max_coins", "ob_depth"}
 MODES = ENUMS["coin_mode"]
-MONEY_KEYS = {"auto_min_turnover", "min_book_usd", "min_wall_usd", "vol_min_usd", "liq_usd", "start_balance"}
+MONEY_KEYS = {"max_depth_usd", "auto_min_turnover", "min_book_usd", "min_wall_usd", "vol_min_usd", "liq_usd", "start_balance"}
 
 HELP = """📖 <b>Команды</b>
 
@@ -415,7 +418,7 @@ class TgBot:
         return "\n".join(lines), InlineKeyboardMarkup(rows)
 
     def text_last(self):
-        rows = self.db.recent_signals(15)
+        rows = [r for r in self.db.recent_signals(60) if '"shadow"' not in (r["features"] or "")][:15]
         if not rows:
             return "🧾 Сигналов пока не было."
         table = [f"{'Время':<5} {'Монета':<8} {'Тип':<11} {'':1} {'5 мин':>6}"]
@@ -531,7 +534,8 @@ class TgBot:
     def analyze_texts(self, period):
         since = {"7d": time.time() - 7 * 86400, "1d": time.time() - 86400}.get(period, 0)
         title = {"7d": "7 дней", "1d": "сутки"}.get(period, "всё время")
-        texts = analyze(self.db.results(since=since), self.s.get("analyze_min"), title)
+        texts = analyze(self.db.results(since=since), self.s.get("analyze_min"), title,
+                        use_be=self.s.get("breakeven"))
         ap = self.s["auto_paused"]
         if ap:
             lines = ["\n\n⏸ <b>На автопаузе</b>\n<i>без сделок и уведомлений, сигналы проверяются виртуально</i>"]

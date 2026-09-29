@@ -50,7 +50,7 @@ class PaperTrader:
                 return cost / qty
         return None
 
-    def try_open(self, sig, signal_id, book=None):
+    def try_open(self, sig, signal_id, book=None, maker_entry=False):
         """Возвращает (trade или None, причина отказа). С book вход считается проходом по стакану."""
         if not self.s.get("paper_enabled"):
             return None, "бумажная торговля выключена"
@@ -66,8 +66,10 @@ class PaperTrader:
 
         slip = self.s.get("slippage_pct") / 100
         fee = self.s.get("fee_pct") / 100
+        entry_fee = self.s.get("maker_fee_pct") / 100 if maker_entry else fee
         sign = 1 if sig["side"] == "LONG" else -1
-        entry = sig["price"] * (1 + sign * slip)
+        # лимитка исполняется по своей цене, без проскальзывания; рыночный вход с проскальзыванием
+        entry = sig["price"] if maker_entry else sig["price"] * (1 + sign * slip)
         risk_dist = abs(entry - sig["sl"]) / entry
         if risk_dist <= 0 or (sign == 1 and sig["sl"] >= entry) or (sign == -1 and sig["sl"] <= entry):
             return None, "стоп с неправильной стороны"
@@ -82,10 +84,10 @@ class PaperTrader:
             # фиксированный риск: на стопе теряем risk_pct% баланса ВМЕСТЕ с комиссиями за вход
             # и выход и проскальзыванием на стопе
             risk_usd = bal * self.s.get("risk_pct") / 100
-            loss_per_usd = risk_dist + 2 * fee + slip
+            loss_per_usd = risk_dist + entry_fee + fee + slip
             notional = min(risk_usd / loss_per_usd, bal * lev)
         qty = notional / entry
-        if book is not None:
+        if book is not None and not maker_entry:
             fill = self.walk_book(book, sig["side"], qty)
             if fill is None:
                 return None, "в стакане не хватает заявок на такой объём"
@@ -97,7 +99,7 @@ class PaperTrader:
         t = {
             "signal_id": signal_id, "symbol": sig["symbol"], "type": sig["type"],
             "side": sig["side"], "entry": entry, "qty": qty, "sl": sig["sl"], "tp": sig["tp"],
-            "open_ts": time.time(), "fees": notional * fee,
+            "open_ts": time.time(), "fees": notional * entry_fee, "entry_fee_pct": entry_fee * 100,
         }
         t["id"] = self.db.open_trade(t)
         self.open[t["id"]] = t
@@ -112,12 +114,31 @@ class PaperTrader:
             if t["symbol"] != symbol:
                 continue
             long = t["side"] == "LONG"
+            self._maybe_breakeven(t, price)
             if (long and price <= t["sl"]) or (not long and price >= t["sl"]):
-                closed.append(self._close(tid, t["sl"], "стоп", slip=True))
+                closed.append(self._close(tid, t["sl"], "безубыток" if t.get("be") else "стоп", slip=True))
             elif (long and price > t["tp"] * (1 + through)) or (not long and price < t["tp"] * (1 - through)):
                 # тейк стоит лимитным ордером: без проскальзывания и с мейкерской комиссией
                 closed.append(self._close(tid, t["tp"], "тейк", slip=False, maker=True))
         return closed
+
+    def be_price(self, entry, side, entry_fee_pct=None):
+        """Цена стопа, при которой сделка закроется примерно в ноль с учётом комиссий и проскальзывания."""
+        sign = 1 if side == "LONG" else -1
+        ef = self.s.get("fee_pct") if entry_fee_pct is None else entry_fee_pct
+        cost = (ef + self.s.get("fee_pct") + self.s.get("slippage_pct")) / 100
+        return entry * (1 + sign * cost)
+
+    def _maybe_breakeven(self, t, price):
+        if t.get("be") or not self.s.get("breakeven"):
+            return
+        span = t["tp"] - t["entry"]
+        if span == 0:
+            return
+        if (price - t["entry"]) / span >= self.s.get("be_trigger"):
+            t["sl"] = self.be_price(t["entry"], t["side"], t.get("entry_fee_pct"))
+            t["be"] = True
+            self.db.update_trade_sl(t["id"], t["sl"])
 
     def check_timeouts(self, prices):
         closed = []
