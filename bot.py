@@ -151,7 +151,7 @@ class TgBot:
     # ---------- служебное ----------
     async def _post_init(self, app):
         await self.engine.start()
-        app.create_task(self._sender())
+        self._sender_task = asyncio.create_task(self._sender())  # живёт всё время работы бота
         try:
             await app.bot.set_my_commands([
                 ("menu", "Главное меню"), ("status", "Состояние"), ("coins", "Монеты"),
