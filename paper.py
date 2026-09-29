@@ -58,6 +58,9 @@ class PaperTrader:
             return None, "по монете уже есть открытая сделка"
         if len(self.open) >= self.s.get("max_open"):
             return None, "достигнут лимит открытых сделок"
+        same = sum(1 for t in self.open.values() if t["side"] == sig["side"])
+        if same >= self.s.get("max_same_side"):
+            return None, f"уже {same} сделки в {sig['side']}: рынок двигается вместе, не удваиваем ставку"
         if self.daily_stop_hit():
             return None, "дневной лимит убытка достигнут"
 

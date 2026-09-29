@@ -29,7 +29,7 @@ GROUPS = {
     "risk": ("💼 Риск и бумажная торговля", ["paper_enabled", "start_balance", "size_mode", "risk_pct",
                                             "margin_pct", "max_leverage",
                                             "rr", "sl_buffer_pct", "default_sl_pct", "min_sl_pct", "stop_pause_min", "max_hold_min",
-                                            "max_open", "daily_loss_pct", "fee_pct", "maker_fee_pct", "slippage_pct", "tp_through_pct"]),
+                                            "max_open", "max_same_side", "daily_loss_pct", "fee_pct", "maker_fee_pct", "slippage_pct", "tp_through_pct"]),
     "learn": ("🧠 Обучение", ["auto_pause", "pause_window", "pause_coin_window", "analyze_min"]),
     "general": ("⚙️ Общее", ["cooldown_sec", "btc_filter", "btc_filter_pct"]),
 }
@@ -332,30 +332,47 @@ class TgBot:
     def screen_trades(self):
         e = self.engine
         prices = e.prices()
-        lines = [f"<b>💼 Бумажный счёт</b> · баланс {e.paper.balance():.2f}$", ""]
+        bal = e.paper.balance()
+        start = self.s.get("start_balance")
+        day = e.paper.day_pnl()
+        lines = [
+            "💼 <b>Бумажный счёт</b>",
+            f"Баланс <b>${bal:,.2f}</b>".replace(",", " ")
+            + (f"  ({(bal / start - 1) * 100:+.1f}% от старта)" if start else ""),
+            f"Сегодня {'+' if day >= 0 else '-'}${abs(day):.2f}",
+            "",
+        ]
         rows = []
         if e.paper.open:
-            lines.append("<b>Открытые:</b>")
-            lines.append("<i>Минус сразу после входа это комиссия за вход, она списывается сразу.</i>")
+            lines.append(f"<b>Открыто ({len(e.paper.open)})</b>  <i>в PnL уже вычтена комиссия входа</i>")
             for t in e.paper.open.values():
                 p = prices.get(t["symbol"])
                 sign = 1 if t["side"] == "LONG" else -1
                 u = sign * (p - t["entry"]) * t["qty"] - t["fees"] if p else 0
                 to_sl = abs(p - t["sl"]) / p * 100 if p else 0
                 to_tp = abs(t["tp"] - p) / p * 100 if p else 0
-                lines.append(f"#{t['id']} {t['side']} {t['symbol']} · {fdur(time.time() - t['open_ts'])}\n"
-                             f"   вход {fp(t['entry'])} → сейчас {fp(p)} · <b>{u:+.2f}$</b> "
-                             f"(вкл. комиссию входа {t['fees']:.2f}$)\n"
-                             f"   стоп {fp(t['sl'])} (ещё {to_sl:.2f}%) · тейк {fp(t['tp'])} (ещё {to_tp:.2f}%)")
-                rows.append([B(f"Закрыть #{t['id']} {t['symbol']}", callback_data=f"close:{t['id']}")])
+                icon = "🟢" if t["side"] == "LONG" else "🔴"
+                lines += [
+                    "",
+                    f"{icon} <b>{t['side']} {t['symbol'].replace('USDT', '')}</b>  "
+                    f"<b>{'+' if u >= 0 else '-'}${abs(u):.2f}</b>  · {fdur(time.time() - t['open_ts'])}",
+                    f"<code>{fp(t['entry'])} → {fp(p)}</code>",
+                    f"до стопа {to_sl:.2f}% · до тейка {to_tp:.2f}%",
+                ]
+                rows.append([B(f"✋ Закрыть {t['symbol'].replace('USDT', '')} #{t['id']}",
+                               callback_data=f"close:{t['id']}")])
         else:
             lines.append("Открытых сделок нет.")
         closed = self.db.closed_trades(limit=10)
         if closed:
-            lines += ["", "<b>Последние закрытые:</b>"]
+            wins = sum(1 for t in closed if t["pnl"] > 0)
+            lines += ["", f"<b>Последние {len(closed)}</b>  ({wins} в плюс)"]
+            table = []
             for t in closed:
                 icon = "✅" if t["pnl"] > 0 else "❌"
-                lines.append(f"{icon} #{t['id']} {t['side']} {t['symbol']} {t['pnl']:+.2f}$ ({t['reason']})")
+                sym = t["symbol"].replace("USDT", "")[:8]
+                table.append(f"{icon} {t['side']:<5} {sym:<8} {t['pnl']:+7.2f}  {t['reason']}")
+            lines.append("<pre>" + "\n".join(table) + "</pre>")
         rows.append([B("🔄 Обновить", callback_data="scr:trades"), B("♻️ Сбросить счёт", callback_data="ask:reset_paper")])
         rows.append(self.BACK)
         return "\n".join(lines), InlineKeyboardMarkup(rows)

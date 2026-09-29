@@ -43,7 +43,9 @@ def fusd(v):
     if a >= 1e6:
         return f"{sign}${a / 1e6:.2f}M"
     if a >= 1e3:
-        return f"{sign}${a / 1e3:.0f}K"
+        return f"{sign}${a / 1e3:.0f}K" if a >= 1e4 else f"{sign}${a:,.0f}".replace(",", " ")
+    if a >= 100:
+        return f"{sign}${a:.0f}"
     return f"{sign}${a:.2f}"
 
 
@@ -523,57 +525,78 @@ class Engine:
 
     def _fmt_signal(self, sig, trade, why):
         d = sig["details"]
-        icon = "🟢" if sig["side"] == "LONG" else "🔴"
+        long = sig["side"] == "LONG"
         pr = sig["price"]
-        lines = [
-            f"{icon} <b>{sig['side']} {sig['symbol']}</b> · {TYPE_NAMES.get(sig['type'], sig['type'])}",
-            f"Цена: <code>{fp(pr)}</code>",
-        ]
-        t = sig["type"].split("_")[0]
-        if t in ("bounce", "breakout"):
-            if t == "bounce":
-                side_name = "bid" if sig["side"] == "LONG" else "ask"
-            else:
-                side_name = "ask" if sig["side"] == "LONG" else "bid"
-                if sig["type"] == "breakout_fade":
-                    side_name = "bid" if sig["side"] == "LONG" else "ask"
-            lines.append(f"Плотность: <code>{fp(d['wall_price'])}</code> {side_name}, {fusd(d['wall_usd'])}, "
-                         f"живёт {fdur(d['age'])}")
-            extra = f"доверие {d['trust']}/100"
-            if d.get("eaten_usd"):
-                extra += f", съели {fusd(d['eaten_usd'])}"
-            if d.get("moves"):
-                extra += f", переставлялась {d['moves']}x"
-            lines.append(extra)
-        elif t == "volume":
-            lines.append(f"Объём за минуту: {fusd(d['vol'])} (в {d['vol'] / d['avg']:.1f}x выше среднего), "
-                         f"движение {d['move']:+.2f}%")
-        elif t == "liq":
-            lines.append(f"Ликвидации за 60с: лонги {fusd(d['longs'])}, шорты {fusd(d['shorts'])}")
+        typ = sig["type"]
+        t = typ.split("_")[0]
         sl_pct = (sig["sl"] / pr - 1) * 100
         tp_pct = (sig["tp"] / pr - 1) * 100
-        lines.append(f"Стоп: <code>{fp(sig['sl'])}</code> ({sl_pct:+.2f}%) · Тейк: <code>{fp(sig['tp'])}</code> ({tp_pct:+.2f}%)")
+        lines = [
+            f"{'🟢' if long else '🔴'} <b>{sig['side']} {sig['symbol'].replace('USDT', '')}</b>",
+            f"<i>{TYPE_NAMES.get(typ, typ)}</i>",
+            "",
+            f"Вход   <code>{fp(pr)}</code>",
+            f"Стоп   <code>{fp(sig['sl'])}</code>  {sl_pct:+.2f}%",
+            f"Тейк   <code>{fp(sig['tp'])}</code>  {tp_pct:+.2f}%",
+            "",
+        ]
+        if t in ("bounce", "breakout"):
+            wall = f"<code>{fp(d['wall_price'])}</code>"
+            if t == "bounce":
+                kind = "на покупку" if long else "на продажу"
+                lines.append(f"🧱 Цена у плотности {kind} {wall}")
+                lines.append("ждём отскок " + ("вверх" if long else "вниз"))
+            else:
+                # у пробоя стенка стояла против движения цены
+                up = (long and typ == "breakout") or (not long and typ == "breakout_fade")
+                kind = "на продажу" if up else "на покупку"
+                lines.append(f"🧱 Съели плотность {kind} {wall}, цена прошла " + ("вверх" if up else "вниз"))
+                if typ == "breakout_fade":
+                    lines.append("ставка на ложный пробой: возврат " + ("вниз" if up else "вверх"))
+            info = [fusd(d["wall_usd"])]
+            if d.get("eaten_usd"):
+                info.append(f"съели {fusd(d['eaten_usd'])}")
+            if d.get("ratio"):
+                info.append(f"x{d['ratio']:.0f} к соседям")
+            lines.append(" · ".join(info))
+            trust = f"Доверие {d['trust']}/100 · живёт {fdur(d['age'])}"
+            if d.get("moves"):
+                trust += f" · переставлялась {d['moves']}x"
+            lines.append(trust)
+        elif t == "volume":
+            lines.append(f"📊 Объём {fusd(d['vol'])} за минуту, x{d['vol'] / d['avg']:.0f} к среднему")
+            lines.append(f"цена за минуту {d['move']:+.2f}%" +
+                         (", ставка на откат" if typ == "volume_rev" else ", вход по импульсу"))
+        elif t == "liq":
+            lines.append(f"💥 Ликвидации за минуту: лонги {fusd(d['longs'])} · шорты {fusd(d['shorts'])}")
+        lines.append("")
         if trade:
             notional = trade["qty"] * trade["entry"]
             lev = self.s.get("max_leverage")
             fee = self.s.get("fee_pct") / 100
             risk = (abs(trade["entry"] - trade["sl"]) * trade["qty"] + notional * (2 * fee)
                     + trade["sl"] * trade["qty"] * self.s.get("slippage_pct") / 100)
-            lines.append(f"📝 Бумажная сделка #{trade['id']}: позиция {fusd(notional)} "
-                         f"(залог {fusd(notional / lev)} x{lev:g}), на стопе ≈ -{fusd(risk)} с комиссиями")
+            lines.append(f"📝 Сделка #{trade['id']} · позиция {fusd(notional)} · залог {fusd(notional / lev)} ×{lev:g}")
+            lines.append(f"Риск на стопе ≈ {fusd(risk)} с комиссиями")
         elif why and self.s.get("paper_enabled"):
-            lines.append(f"📝 Сделка не открыта: {why}")
+            lines.append(f"📝 Без сделки: {why}")
         lines.append(f"<i>сигнал #{sig['id']}</i>")
         return "\n".join(lines)
 
     def _fmt_close(self, t):
         if t.get("reason") == "стоп":
             self.stop_block[t["symbol"]] = time.time()
-        icon = "✅" if t["pnl"] > 0 else "❌"
+        icon = {"тейк": "✅", "стоп": "❌", "время": "⏱", "вручную": "✋"}.get(t["reason"], "•")
+        if t["reason"] in ("время", "вручную"):
+            icon = ("✅ " if t["pnl"] > 0 else "❌ ") + icon
         pct = (t["exit"] / t["entry"] - 1) * 100 * (1 if t["side"] == "LONG" else -1)
-        return (f"{icon} Сделка #{t['id']} {t['side']} {t['symbol']} закрыта ({t['reason']})\n"
-                f"Вход {fp(t['entry'])} → выход {fp(t['exit'])} ({pct:+.2f}%)\n"
-                f"PnL: <b>{t['pnl']:+.2f}$</b> (комиссии {t['fees']:.2f}$) · Баланс: {self.paper.balance():.2f}$")
+        mins = fdur(time.time() - t["open_ts"]) if t.get("open_ts") else ""
+        return (f"{icon} <b>{t['reason'].capitalize()} · {t['side']} {t['symbol'].replace('USDT', '')}</b>"
+                f"  <i>#{t['id']}</i>\n"
+                f"<code>{fp(t['entry'])} → {fp(t['exit'])}</code>  {pct:+.2f}%\n"
+                f"PnL <b>{'+' if t['pnl'] >= 0 else '-'}{fusd(abs(t['pnl']))}</b>"
+                f"  (комиссии {fusd(t['fees'])}) · {mins}\n"
+                f"Баланс ${self.paper.balance():,.2f}".replace(",", " "))
 
     # ---------- медленный цикл: исходы сигналов, таймауты ----------
     async def _slow_loop(self):
