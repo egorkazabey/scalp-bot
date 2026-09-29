@@ -26,6 +26,7 @@ GROUPS = {
                               "max_walls_side", "min_wall_age_sec", "min_trust", "approach_pct"]),
     "flow": ("📊 Объём и ликвидации", ["volume_mode", "vol_mult", "vol_min_move_pct", "vol_min_usd",
                                       "liq_mode", "liq_usd", "liq_turnover_pct", "auto_scale"]),
+    "sweep": ("🎣 Вынос стопов", ["sweep_min_pct", "sweep_max_pct", "sweep_window_sec"]),
     "size": ("💼 Размер сделки", ["paper_enabled", "start_balance", "size_mode", "risk_pct", "margin_pct",
                                  "max_leverage", "rr"]),
     "entry": ("🎯 Вход и выход", ["bounce_entry", "limit_offset_pct", "entry_wait_sec", "confirm_window_sec",

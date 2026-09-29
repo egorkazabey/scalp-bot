@@ -86,6 +86,14 @@ GROUPS = [
                                            [(30, "<30 сильно против"), (45, "30-45"), (55, "45-55"), (70, "55-70"),
                                             (None, "70+ сильно по")], None)),
     ("Уровни суток", lambda r: _levels(r)),
+    ("Открытый интерес за 5 мин", lambda r: r["f"].get("oi_regime") or (
+        None if r["f"].get("oi5") is None else "почти не менялся")),
+    ("Фандинг", lambda r: r["f"].get("crowd")),
+    ("Дельта за минуту", lambda r: _bucket(r["f"].get("delta1"),
+                                         [(-0.3, "давят против сделки"), (0.3, "равновесие"),
+                                          (None, "давят за сделку")], None)),
+    ("Поглощение", lambda r: r["f"].get("absorb") or ("нет" if "delta1" in r["f"] else None)),
+    ("Айсберг рядом", lambda r: r["f"].get("iceberg") or ("нет" if "delta1" in r["f"] else None)),
     ("Совпало факторов", lambda r: None if r["f"].get("conf") is None else
         {0: "0", 1: "1", 2: "2"}.get(r["f"]["conf"], "3+")),
     ("Монета", lambda r: r["symbol"].replace("USDT", "")),

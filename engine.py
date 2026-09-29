@@ -5,7 +5,7 @@ import time
 
 from bybit import BybitFeed
 from config import TYPE_NAMES
-from detectors import LiqTracker, PriceHistory, VolumeTracker, WallTracker
+from detectors import FlowTracker, LiqTracker, OITracker, PriceHistory, VolumeTracker, WallTracker
 from chart import ChartState, parse_klines
 from paper import PaperTrader
 
@@ -67,6 +67,8 @@ class Engine:
         self.feed = BybitFeed(self._on_book, self._on_trades, self._on_ticker, self._on_liq,
                               depth=settings.get("ob_depth"))
         self.walls, self.vol, self.liq, self.hist = {}, {}, {}, {}
+        self.oi, self.flow = {}, {}   # открытый интерес и лента (дельта, поглощение, айсберги)
+        self.sweeps = {}              # монета -> состояние проколов уровней для сигнала «вынос стопов»
         self.cooldown = {}
         self.outbox = asyncio.Queue()
         self.tasks = []
@@ -188,7 +190,7 @@ class Engine:
                      | {s for s, v in self.virtual.items() if v})
             syms = set(self.symbols) | extra
             for d, cls in ((self.walls, None), (self.vol, VolumeTracker), (self.liq, LiqTracker),
-                           (self.hist, PriceHistory)):
+                           (self.hist, PriceHistory), (self.oi, OITracker), (self.flow, FlowTracker)):
                 for sym in list(d):
                     if sym not in syms:
                         del d[sym]
@@ -250,7 +252,13 @@ class Engine:
         pass  # стакан анализируется в _loop раз в 0.5 сек
 
     def _on_ticker(self, sym, data):
-        pass  # тикеры лежат в self.feed.tickers
+        # тикеры лежат в self.feed.tickers; открытый интерес копим для истории
+        v = data.get("openInterestValue")
+        if v and sym in self.oi:
+            try:
+                self.oi[sym].add(time.time(), float(v))
+            except ValueError:
+                pass
 
     def _on_trades(self, sym, trades):
         if sym not in self.hist:
@@ -258,7 +266,10 @@ class Engine:
         touch = self.s.get("approach_pct", sym)
         has_open = any(t["symbol"] == sym for t in self.paper.open.values())
         virt = self.virtual.get(sym)
-        for ts, price, qty, _side in trades:
+        flow = self.flow.get(sym)
+        for ts, price, qty, taker in trades:
+            if flow is not None:
+                flow.add(ts, price, price * qty, taker)
             if virt:
                 self._check_virtual(sym, price)
             if self.limits.get(sym):
@@ -354,6 +365,10 @@ class Engine:
                         "details": dict(details)})
 
         self._check_pending(sym, tracker, mid, last, now, p)
+
+        # вынос стопов: прокол максимума или минимума суток / 4 часов и быстрый возврат
+        if on.get("sweep"):
+            self._check_sweeps(sym, last, now, p)
 
         # всплеск объёма
         if on["volume"]:
@@ -480,6 +495,53 @@ class Engine:
                 keep.append(c)
         self.confirms[sym] = keep
 
+    def _sweep_levels(self, sym):
+        """Уровни, за которыми обычно стоят стопы: максимум и минимум суток и последних 4 часов
+        (по закрытым свечам)."""
+        ch = self.charts.get(sym)
+        if not ch or len(ch.k60) < 25 or len(ch.k15) < 17:
+            return []
+        d, h4 = ch.k60[-25:-1], ch.k15[-17:-1]
+        out = [("суток", "hi", max(k[2] for k in d)), ("суток", "lo", min(k[3] for k in d))]
+        hi4, lo4 = max(k[2] for k in h4), min(k[3] for k in h4)
+        if abs(hi4 / out[0][2] - 1) > 0.001:
+            out.append(("4ч", "hi", hi4))
+        if abs(lo4 / out[1][2] - 1) > 0.001:
+            out.append(("4ч", "lo", lo4))
+        return out
+
+    def _check_sweeps(self, sym, last, now, p):
+        st = self.sweeps.setdefault(sym, {})
+        mn, mx, win = p("sweep_min_pct"), p("sweep_max_pct"), p("sweep_window_sec")
+        for name, kind, lvl in self._sweep_levels(sym):
+            key = (name, kind)
+            s = st.get(key)
+            if s and s["level"] != lvl:      # уровень обновился (новые свечи): начинаем заново
+                s = st[key] = None
+            beyond = (last - lvl) / lvl * 100 if kind == "hi" else (lvl - last) / lvl * 100
+            if s is None:
+                if beyond >= mn:
+                    st[key] = {"level": lvl, "ext": last, "t0": now, "dead": False}
+                continue
+            if kind == "hi":
+                s["ext"] = max(s["ext"], last)
+            else:
+                s["ext"] = min(s["ext"], last)
+            pierce = abs(s["ext"] / lvl - 1) * 100
+            if pierce > mx:
+                s["dead"] = True             # ушла слишком далеко: это настоящий пробой
+            if beyond < -0.02:               # цена вернулась за уровень
+                if not s["dead"] and now - s["t0"] <= win:
+                    side = "SHORT" if kind == "hi" else "LONG"
+                    buf = p("sl_buffer_pct") / 100
+                    sl = s["ext"] * (1 + buf) if side == "SHORT" else s["ext"] * (1 - buf)
+                    self.emit(sym, "sweep", side, last, sl, {
+                        "level": lvl, "level_name": name, "kind": kind, "pierce": pierce,
+                        "extreme": s["ext"], "took": now - s["t0"]})
+                st[key] = None
+            elif now - s["t0"] > win:
+                s["dead"] = True
+
     def _filter_reason(self, sym, f):
         """Фильтры из выводов анализа. Отфильтрованный сигнал всё равно проверяется виртуально."""
         mx = self.eff("max_depth_usd", sym)
@@ -531,6 +593,54 @@ class Engine:
                 f.update(ch.features(price, side))
             except Exception:
                 log.exception("chart features %s", sym)
+        long = side == "LONG"
+        # открытый интерес: новые деньги заходят или позиции закрываются
+        if sym in self.oi:
+            oi5 = self.oi[sym].change_pct(300, now)
+            if oi5 is not None:
+                f["oi5"] = round(oi5, 3)
+                p5 = h.ago(300, now) if h else None
+                if p5:
+                    pc = (price / p5 - 1) * 100
+                    if abs(oi5) >= 0.2:
+                        f["oi_regime"] = ("новые лонги" if oi5 > 0 else "закрытие шортов") if pc >= 0 else \
+                                         ("новые шорты" if oi5 > 0 else "закрытие лонгов")
+        # фандинг: куда перекошена толпа
+        try:
+            fr = float(self.feed.tickers.get(sym, {}).get("fundingRate")) * 100
+            f["funding"] = round(fr, 4)
+            if abs(fr) > 0.012:
+                f["crowd"] = "с толпой" if (fr > 0) == long else "против толпы"
+            else:
+                f["crowd"] = "нейтрально"
+        except (TypeError, ValueError):
+            pass
+        # лента: дельта, поглощение, айсберги
+        flow = self.flow.get(sym)
+        if flow is not None:
+            d1, b1, s1, _ = flow.delta(60, now)
+            d5, _, _, _ = flow.delta(300, now)
+            f["delta1"] = round(d1 if long else -d1, 3)
+            f["delta5"] = round(d5 if long else -d5, 3)
+            vr = self.vol[sym].check(now) if sym in self.vol else None
+            avg_min = vr[1] if vr else None
+            ab = flow.absorption(now, avg_min)
+            if ab:
+                f["absorb"] = "за сделку" if (ab == "buy") == long else "против сделки"
+            book = self.feed.books.get(sym)
+            if book and book.bids and book.asks:
+                ice = flow.icebergs(book, book.mid(), now, max(10_000, (avg_min or 0) * 0.3))
+                # айсберги по плотностям: съели больше, чем было видно, а она стоит
+                for w in self.walls.get(sym, WallTracker(sym)).walls.values():
+                    if w.traded_usd >= 1.5 * w.max_usd:
+                        ice[w.side] = max(ice.get(w.side, 0), w.traded_usd)
+                ours, theirs = ("bid", "ask") if long else ("ask", "bid")
+                if ours in ice and theirs not in ice:
+                    f["iceberg"] = "за сделку"
+                elif theirs in ice and ours not in ice:
+                    f["iceberg"] = "против сделки"
+                elif ice:
+                    f["iceberg"] = "с обеих сторон"
         # совпадение факторов в пользу сделки
         conf = []
         if f.get("btc_dir") == "with":
@@ -724,6 +834,11 @@ class Engine:
                          (", ставка на откат" if typ == "volume_rev" else ", вход по импульсу"))
         elif t == "liq":
             lines.append(f"💥 Ликвидации за минуту: лонги {fusd(d['longs'])} · шорты {fusd(d['shorts'])}")
+        elif t == "sweep":
+            what = "максимум" if d["kind"] == "hi" else "минимум"
+            lines.append(f"🎣 Прокололи {what} {d['level_name']} <code>{fp(d['level'])}</code> на {d['pierce']:.2f}% "
+                         f"и за {fdur(d['took'])} вернулись назад")
+            lines.append("стопы собраны, ставка на возврат · стоп за проколом")
         ch = self.charts.get(sig["symbol"])
         if ch:
             summ = ch.summary(pr)

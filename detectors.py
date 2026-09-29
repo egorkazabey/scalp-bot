@@ -237,3 +237,94 @@ class PriceHistory:
         if len(pts) < 2:
             return None
         return (max(pts) - min(pts)) / pts[-1] * 100
+
+
+class OITracker:
+    """Открытый интерес в $ по тикерам Bybit, точка не чаще раза в 5 секунд, за последние 30 минут."""
+
+    def __init__(self):
+        self.points = deque()
+
+    def add(self, ts, oi_usd):
+        if not self.points or ts - self.points[-1][0] >= 5:
+            self.points.append((ts, oi_usd))
+            while self.points and self.points[0][0] < ts - 1800:
+                self.points.popleft()
+
+    def change_pct(self, sec, now):
+        if len(self.points) < 2 or self.points[0][0] > now - sec + 10:
+            return None
+        base = None
+        for ts, v in self.points:
+            if ts <= now - sec:
+                base = v
+            else:
+                break
+        last = self.points[-1][1]
+        return (last / base - 1) * 100 if base else None
+
+
+class FlowTracker:
+    """Лента за последние 5 минут: кто агрессивнее (дельта), поглощение, айсберги на уровнях."""
+
+    def __init__(self):
+        self.trades = deque()   # (ts, price, usd, taker_side)
+        self.levels = {}        # (сторона стакана, цена) -> [usd, last_ts]: сколько исполнили по уровню
+
+    def add(self, ts, price, usd, taker_side):
+        self.trades.append((ts, price, usd, taker_side))
+        while self.trades and self.trades[0][0] < ts - 300:
+            self.trades.popleft()
+        # покупатель по рынку забирает ask, продавец бьёт в bid
+        key = ("ask" if taker_side == "Buy" else "bid", price)
+        lv = self.levels.get(key)
+        if lv:
+            lv[0] += usd
+            lv[1] = ts
+        else:
+            self.levels[key] = [usd, ts]
+        if len(self.levels) > 5000:
+            cut = ts - 180
+            self.levels = {k: v for k, v in self.levels.items() if v[1] >= cut}
+
+    def delta(self, sec, now):
+        """(покупки - продажи) / (покупки + продажи) за sec секунд, от -1 до 1, и объёмы."""
+        buy = sell = 0.0
+        p0 = p1 = None
+        for ts, price, usd, side in self.trades:
+            if ts < now - sec:
+                continue
+            if p0 is None:
+                p0 = price
+            p1 = price
+            if side == "Buy":
+                buy += usd
+            else:
+                sell += usd
+        tot = buy + sell
+        move = (p1 / p0 - 1) * 100 if p0 else 0.0
+        return ((buy - sell) / tot if tot else 0.0), buy, sell, move
+
+    def absorption(self, now, avg_minute_usd):
+        """Поглощение за минуту: одна сторона агрессивно давит, а цена почти не двигается.
+        'buy' значит продажи поглощены (в пользу роста), 'sell' наоборот."""
+        d, buy, sell, move = self.delta(60, now)
+        need = max(avg_minute_usd or 0, 1)
+        if sell > 2 * buy and sell >= need and abs(move) < 0.1:
+            return "buy"
+        if buy > 2 * sell and buy >= need and abs(move) < 0.1:
+            return "sell"
+        return None
+
+    def icebergs(self, book, mid, now, min_usd, zone_pct=0.3):
+        """Уровни, где за 3 минуты исполнили в 3+ раза больше, чем сейчас видно, а заявка всё стоит:
+        там скрытый крупный ордер. Возвращает {'bid': usd, 'ask': usd} по самому сильному на сторону."""
+        out = {}
+        for (side, px), (usd, ts) in self.levels.items():
+            if now - ts > 180 or usd < min_usd or abs(px / mid - 1) * 100 > zone_pct:
+                continue
+            levels = book.bids if side == "bid" else book.asks
+            visible = levels.get(px, 0) * px
+            if visible > 0 and usd >= 3 * visible and usd > out.get(side, 0):
+                out[side] = usd
+        return out
