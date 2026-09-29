@@ -619,7 +619,7 @@ class Engine:
         if mn and f.get("chg24") is not None and abs(f["chg24"]) < mn:
             return "монета почти не двигается за сутки"
         coins = [c.strip() for c in (self.s.get("blocked_coins") or "").split(",") if c.strip()]
-        if sym.removesuffix("USDT") in coins:
+        if sym.replace("USDT", "") in coins:
             return "монета в списке запрещённых"
         mc = self.eff("min_confluence", sym)
         if mc and f.get("conf", 0) < mc:

@@ -361,7 +361,7 @@ def _cast(key, raw):
     if key in ("regime_block", "blocked_coins") and s.lower() in ("-", "нет", "0", "пусто", "off"):
         return ""
     if key == "blocked_coins":
-        coins = [c.strip().upper().removesuffix("USDT") for c in s.replace(" ", ",").split(",")]
+        coins = [c.strip().upper().replace("USDT", "") for c in s.replace(" ", ",").split(",")]
         return ",".join(dict.fromkeys(c for c in coins if c))
     return s
 
