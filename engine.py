@@ -554,7 +554,16 @@ class Engine:
 
     def _check_sweeps(self, sym, last, now, p):
         st = self.sweeps.setdefault(sym, {})
-        mn, mx, win = p("sweep_min_pct"), p("sweep_max_pct"), p("sweep_window_sec")
+        mx, win, reclaim = p("sweep_max_pct"), p("sweep_window_sec"), p("sweep_reclaim_pct")
+        # минимальный прокол: не меньше настройки и не меньше половины обычной 15-минутной свечи,
+        # иначе это просто дрожание цены у уровня
+        mn = p("sweep_min_pct")
+        ch = self.charts.get(sym)
+        if ch and len(ch.k15) >= 9:
+            rng = sum((k[2] - k[3]) / k[4] * 100 for k in ch.k15[-9:-1]) / 8
+            mn = max(mn, rng * 0.5)
+        vr = self.vol[sym].check(now) if sym in self.vol else None
+        avg_sec = vr[1] / 60 if vr and vr[1] > 0 else None
         for name, kind, lvl in self._sweep_levels(sym):
             key = (name, kind)
             s = st.get(key)
@@ -562,7 +571,7 @@ class Engine:
                 s = st[key] = None
             beyond = (last - lvl) / lvl * 100 if kind == "hi" else (lvl - last) / lvl * 100
             if s is None:
-                if beyond >= mn:
+                if beyond > 0:
                     st[key] = {"level": lvl, "ext": last, "t0": now, "dead": False}
                 continue
             if kind == "hi":
@@ -572,15 +581,26 @@ class Engine:
             pierce = abs(s["ext"] / lvl - 1) * 100
             if pierce > mx:
                 s["dead"] = True             # ушла слишком далеко: это настоящий пробой
-            if beyond < -0.02:               # цена вернулась за уровень
-                if not s["dead"] and now - s["t0"] <= win:
+            if beyond <= -reclaim:           # цена уверенно вернулась за уровень
+                took = now - s["t0"]
+                ok = not s["dead"] and took <= win and pierce >= mn
+                vol_x = None
+                if ok and avg_sec and sym in self.flow:
+                    # объём в сторону прокола за время прокола: сработавшие стопы
+                    taker = "Buy" if kind == "hi" else "Sell"
+                    pv = sum(u for ts, _, u, sd in self.flow[sym].trades if ts >= s["t0"] - 2 and sd == taker)
+                    vol_x = pv / (avg_sec * max(took, 15))
+                    ok = vol_x >= p("sweep_vol_mult")
+                if ok:
                     side = "SHORT" if kind == "hi" else "LONG"
                     buf = p("sl_buffer_pct") / 100
                     sl = s["ext"] * (1 + buf) if side == "SHORT" else s["ext"] * (1 - buf)
                     self.emit(sym, "sweep", side, last, sl, {
                         "level": lvl, "level_name": name, "kind": kind, "pierce": pierce,
-                        "extreme": s["ext"], "took": now - s["t0"]})
+                        "extreme": s["ext"], "took": took, "vol_x": vol_x})
                 st[key] = None
+            elif beyond <= 0 and not s["dead"] and pierce < mn:
+                st[key] = None               # вернулась, не дойдя до нужного прокола: просто шум
             elif now - s["t0"] > win:
                 s["dead"] = True
 
@@ -900,6 +920,8 @@ class Engine:
             what = "максимум" if d["kind"] == "hi" else "минимум"
             lines.append(f"🎣 Прокололи {what} {d['level_name']} <code>{fp(d['level'])}</code> на {d['pierce']:.2f}% "
                          f"и за {fdur(d['took'])} вернулись назад")
+            if d.get("vol_x"):
+                lines.append(f"объём на проколе x{d['vol_x']:.1f} к обычному")
             lines.append("стопы собраны, ставка на возврат · стоп за проколом")
         ch = self.charts.get(sig["symbol"])
         if ch:
