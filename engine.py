@@ -7,8 +7,8 @@ import time
 from bybit import BybitFeed
 from config import TYPE_NAMES
 from detectors import FlowTracker, LiqTracker, OITracker, PriceHistory, VolumeTracker, WallTracker
-from chart import ChartState, parse_klines
-from config import DATA_DIR
+from chart import ChartState, parse_klines, swing_state
+from config import DATA_DIR, PARAMS
 from news import Calendar
 from paper import PaperTrader, near_stop_step
 
@@ -89,11 +89,14 @@ class Engine:
         self.charts = {}     # монета -> ChartState (свечи 15м и 1ч)
         self.calendar = Calendar(os.path.join(DATA_DIR, "calendar.json"))
         self._news_active = None   # событие, вокруг которого сейчас пауза
+        self.swing_last = {}       # (монета, тип) -> когда был последний длинный сигнал
+        self._swing_checked = {}   # монета -> когда последний раз проверяли длинные стратегии
+        self.paper.hold_fn = self.hold_sec
         self._stale_alerted = False
 
     # ---------- жизненный цикл ----------
     async def start(self):
-        horizon = time.time() - self.s.get("max_hold_min") * 60
+        horizon = time.time() - max(self.s.get("max_hold_min") * 60, self.s.get("swing_hold_hours") * 3600)
         self.db.expire_virtual(horizon)
         for r in self.db.open_virtual(horizon):
             self.virtual.setdefault(r["symbol"], {})[r["id"]] = dict(r)
@@ -408,6 +411,11 @@ class Engine:
 
         self._check_pending(sym, tracker, mid, last, now, p)
 
+        # длинные стратегии: тренд и перекос фандинга (проверяем раз в 30 секунд)
+        if (on.get("trend") or on.get("funding")) and now - self._swing_checked.get(sym, 0) >= 30:
+            self._swing_checked[sym] = now
+            self._check_swing(sym, last, now, p, on)
+
         # вынос стопов: прокол максимума или минимума суток / 4 часов и быстрый возврат
         if on.get("sweep"):
             self._check_sweeps(sym, last, now, p)
@@ -484,7 +492,7 @@ class Engine:
             f["shadow"] = 1
         if maker_entry:
             f["maker"] = 1
-        blocked = self._filter_reason(sym, f)
+        blocked = self._filter_reason(sym, f, typ)
         if blocked:
             f["filtered"] = blocked
         sig["id"] = self.db.add_signal(sig)
@@ -537,6 +545,46 @@ class Engine:
             else:
                 keep.append(c)
         self.confirms[sym] = keep
+
+    def _check_swing(self, sym, last, now, p, on):
+        ch = self.charts.get(sym)
+        if not ch:
+            return
+        st = swing_state(ch, last)
+        if not st or not st["atr"]:
+            return
+        stop = p("swing_atr_mult") * st["atr"]
+        base = {"ema20": st["ema20"], "ema50": st["ema50"], "ema200": st["ema200"],
+                "atr": st["atr"], "atr_pct": st["atr"] / last * 100}
+        # тренд: по направлению часового тренда, на откате к EMA20 и развороте 15-минутки
+        if on.get("trend") and now - self.swing_last.get((sym, "trend"), 0) >= p("trend_cooldown_hours") * 3600:
+            e20, e50, e200 = st["ema20"], st["ema50"], st["ema200"]
+            side = None
+            if e50 > e200 and last > e200 and st["low3"] <= e20 * 1.002 and last > e20 and st["last_green"]:
+                side = "LONG"
+            elif e50 < e200 and last < e200 and st["high3"] >= e20 * 0.998 and last < e20 and st["last_red"]:
+                side = "SHORT"
+            if side:
+                self.swing_last[(sym, "trend")] = now
+                sl = last - stop if side == "LONG" else last + stop
+                self.emit(sym, "trend", side, last, sl, dict(base))
+        # перекос фандинга: толпа сильно в одну сторону, а цена за час уже пошла против неё
+        if on.get("funding") and now - self.swing_last.get((sym, "funding"), 0) >= p("funding_cooldown_hours") * 3600:
+            try:
+                fr = float(self.feed.tickers.get(sym, {}).get("fundingRate")) * 100
+            except (TypeError, ValueError):
+                fr = None
+            if fr is not None and abs(fr) >= p("funding_extreme_pct"):
+                tr1h = ch.features(last, "LONG").get("tr1h", 0)
+                side = None
+                if fr > 0 and tr1h < 0:
+                    side = "SHORT"     # толпа в лонгах, а цена падает: лонгам придётся закрываться
+                elif fr < 0 and tr1h > 0:
+                    side = "LONG"      # толпа в шортах, а цена растёт
+                if side:
+                    self.swing_last[(sym, "funding")] = now
+                    sl = last - stop if side == "LONG" else last + stop
+                    self.emit(sym, "funding", side, last, sl, dict(base, funding=fr, tr1h=tr1h))
 
     def _sweep_levels(self, sym):
         """Уровни, за которыми обычно стоят стопы: максимум и минимум суток и последних 4 часов
@@ -605,13 +653,18 @@ class Engine:
             elif now - s["t0"] > win:
                 s["dead"] = True
 
-    def _filter_reason(self, sym, f):
+    def _filter_reason(self, sym, f, typ=None):
         """Фильтры из выводов анализа. Отфильтрованный сигнал всё равно проверяется виртуально."""
         if f.get("news"):
             return f"важные новости: {f['news']}"
         block = [x.strip() for x in self.s.get("regime_block").split(",") if x.strip()]
         if f.get("regime") and f["regime"] in block:
             return f"режим рынка: {f['regime']}"
+        if typ in self.SWING_TYPES:
+            # фильтры скальпинга (глубина, движение за сутки, факторы, дельта) к длинным сделкам не относятся
+            coins = [c.strip() for c in (self.s.get("blocked_coins") or "").split(",") if c.strip()] \
+                if "blocked_coins" in PARAMS else []
+            return "монета в списке запрещённых" if sym.replace("USDT", "") in coins else None
         mx = self.eff("max_depth_usd", sym)
         if mx and f.get("depth") and f["depth"] > mx:
             return "крупная монета с очень глубоким стаканом"
@@ -812,9 +865,9 @@ class Engine:
             self._update_pauses(v["type"], v["symbol"])
 
     def _timeout_virtual(self, now):
-        limit = self.s.get("max_hold_min") * 60
         for sym, d in list(self.virtual.items()):
             for sid, v in list(d.items()):
+                limit = self.hold_sec(v["type"])
                 if now - v["ts"] >= limit:
                     px = self.price(sym)
                     if px:
@@ -822,6 +875,14 @@ class Engine:
                     elif now - v["ts"] >= limit * 3:
                         d.pop(sid, None)
                         self.db.set_signal_result(sid, "lost", None)
+
+    SWING_TYPES = ("trend", "funding")
+
+    def hold_sec(self, typ):
+        """Сколько держать сделку: длинные стратегии часами, скальпинг минутами."""
+        if typ in self.SWING_TYPES:
+            return self.s.get("swing_hold_hours") * 3600
+        return self.s.get("max_hold_min") * 60
 
     def auto_paused(self, typ, sym):
         ap = self.s["auto_paused"]
@@ -935,6 +996,18 @@ class Engine:
                          (", ставка на откат" if typ == "volume_rev" else ", вход по импульсу"))
         elif t == "liq":
             lines.append(f"💥 Ликвидации за минуту: лонги {fusd(d['longs'])} · шорты {fusd(d['shorts'])}")
+        elif t == "trend":
+            up = sig["side"] == "LONG"
+            lines.append(f"📈 Часовой тренд {'вверх' if up else 'вниз'} (EMA50 {'выше' if up else 'ниже'} EMA200), "
+                         f"цена откатилась к EMA20 <code>{d['ema20']:.5g}</code> и развернулась")
+            lines.append(f"стоп {self.s.get('swing_atr_mult'):g} ATR (ATR часа {d['atr_pct']:.2f}%) · "
+                         f"держим до {self.s.get('swing_hold_hours')} ч")
+        elif t == "funding":
+            crowd = "в лонгах" if d["funding"] > 0 else "в шортах"
+            lines.append(f"💸 Фандинг {d['funding']:+.3f}% за 8ч: толпа {crowd}, "
+                         f"а цена за час {d['tr1h']:+.2f}%")
+            lines.append(f"ставка против толпы · стоп {self.s.get('swing_atr_mult'):g} ATR "
+                         f"(ATR часа {d['atr_pct']:.2f}%) · держим до {self.s.get('swing_hold_hours')} ч")
         elif t == "sweep":
             what = "максимум" if d["kind"] == "hi" else "минимум"
             lines.append(f"🎣 Прокололи {what} {d['level_name']} <code>{fp(d['level'])}</code> на {d['pierce']:.2f}% "

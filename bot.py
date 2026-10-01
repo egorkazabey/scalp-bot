@@ -26,6 +26,8 @@ GROUPS = {
                               "max_walls_side", "min_wall_age_sec", "min_trust", "approach_pct"]),
     "flow": ("📊 Объём и ликвидации", ["volume_mode", "vol_mult", "vol_min_move_pct", "vol_min_usd",
                                       "liq_mode", "liq_usd", "liq_turnover_pct", "auto_scale"]),
+    "swing": ("📈 Тренд и фандинг", ["swing_atr_mult", "swing_hold_hours", "trend_cooldown_hours",
+                                     "funding_extreme_pct", "funding_cooldown_hours"]),
     "market": ("📰 Новости и режим рынка", ["news_pause", "news_before_min", "news_after_min",
                                           "news_currencies", "news_impact", "regime_block"]),
     "sweep": ("🎣 Вынос стопов", ["sweep_min_pct", "sweep_max_pct", "sweep_reclaim_pct", "sweep_vol_mult",

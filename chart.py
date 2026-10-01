@@ -89,3 +89,32 @@ class ChartState:
         if "ema200_1h" in f:
             parts.append("выше EMA200" if f["ema200_1h"] == "above" else "ниже EMA200")
         return " · ".join(parts)
+
+
+def atr(candles, n=14):
+    """Средний истинный диапазон по свечам (ts, o, h, l, c), в цене."""
+    if len(candles) < n + 1:
+        return None
+    trs = []
+    for i in range(1, len(candles)):
+        h, l, pc = candles[i][2], candles[i][3], candles[i - 1][4]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    a = sum(trs[:n]) / n
+    for tr in trs[n:]:
+        a = (a * (n - 1) + tr) / n
+    return a
+
+
+def swing_state(ch, price):
+    """Картина для трендовой стратегии на часовиках: EMA20/50/200, ATR, откат к EMA20 на 15м."""
+    if len(ch.k60) < 210 or len(ch.k15) < 8:
+        return None
+    closes = [k[4] for k in ch.k60[:-1]] + [price]
+    s = {"ema20": ema(closes, 20), "ema50": ema(closes, 50), "ema200": ema(closes, 200),
+         "atr": atr(ch.k60[:-1], 14)}
+    last3 = ch.k15[-4:-1]                     # три последние закрытые 15-минутки
+    s["low3"] = min(k[3] for k in last3)
+    s["high3"] = max(k[2] for k in last3)
+    s["last_green"] = ch.k15[-2][4] > ch.k15[-2][1]
+    s["last_red"] = ch.k15[-2][4] < ch.k15[-2][1]
+    return s

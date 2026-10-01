@@ -164,10 +164,12 @@ class PaperTrader:
             t["be"] = True
             self.db.update_trade_sl(t["id"], t["sl"])
 
+    hold_fn = None   # движок подставляет функцию: время удержания по типу сигнала
+
     def check_timeouts(self, prices):
         closed = []
-        limit = self.s.get("max_hold_min") * 60
         for tid, t in list(self.open.items()):
+            limit = self.hold_fn(t.get("type")) if self.hold_fn else self.s.get("max_hold_min") * 60
             if time.time() - t["open_ts"] >= limit and prices.get(t["symbol"]):
                 closed.append(self._close(tid, prices[t["symbol"]], "время", slip=True))
         return closed
