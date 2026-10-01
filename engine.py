@@ -510,7 +510,8 @@ class Engine:
             mult = self.eff("strong_size_mult", sym) if self.is_strong(sym, f) else 1.0
             trade, why = self.paper.try_open(sig, sig["id"], book=self.feed.books.get(sym),
                                              maker_entry=maker_entry, size_mult=mult)
-        if self.s["notify"].get(typ.split("_")[0], True):
+        if self.s["notify"].get(typ.split("_")[0], True) and (trade or self.s.get("notify_skipped")
+                                                              or not self.s.get("paper_enabled")):
             self.say(self._fmt_signal(sig, trade, why), sym)
 
     # ---------- лимитки и подтверждения ----------

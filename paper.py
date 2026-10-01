@@ -72,9 +72,12 @@ class PaperTrader:
             return None, "бумажная торговля выключена"
         if any(t["symbol"] == sig["symbol"] for t in self.open.values()):
             return None, "по монете уже есть открытая сделка"
-        if len(self.open) >= self.s.get("max_open"):
-            return None, "достигнут лимит открытых сделок"
-        same = sum(1 for t in self.open.values() if t["side"] == sig["side"])
+        # длинные сделки (тренд, фандинг) держатся часами: у них свои места, чтобы не занимать скальпинг
+        swing = sig["type"] in self.swing_types
+        group = [t for t in self.open.values() if (t.get("type") in self.swing_types) == swing]
+        if len(group) >= self.s.get("swing_max_open" if swing else "max_open"):
+            return None, "достигнут лимит открытых " + ("длинных сделок" if swing else "сделок")
+        same = sum(1 for t in group if t["side"] == sig["side"])
         if same >= self.s.get("max_same_side"):
             return None, f"уже {same} сделки в {sig['side']}: рынок двигается вместе, не удваиваем ставку"
         if self.daily_stop_hit():
@@ -164,6 +167,7 @@ class PaperTrader:
             t["be"] = True
             self.db.update_trade_sl(t["id"], t["sl"])
 
+    swing_types = ("trend", "funding")
     hold_fn = None   # движок подставляет функцию: время удержания по типу сигнала
 
     def check_timeouts(self, prices):
