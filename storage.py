@@ -82,7 +82,7 @@ class Storage:
         self.db.execute("UPDATE signals SET result='lost' WHERE result IS NULL AND ts <= ?", (before,))
         self.db.commit()
 
-    def last_results(self, n, typ=None, symbol=None, since=0, col="r_pct"):
+    def last_results(self, n, typ=None, symbol=None, since=0, col="r_pct", not_types=()):
         assert col in ("r_pct", "r_be", "r_near", "r_both")
         col = f"COALESCE({col}, r_pct)"
         q = f"SELECT {col} FROM signals WHERE result IN ('tp','sl','time') AND ts >= ?"
@@ -93,6 +93,9 @@ class Storage:
         if symbol:
             q += " AND symbol=?"
             args.append(symbol)
+        for t in not_types:
+            q += " AND type!=?"
+            args.append(t)
         q += " ORDER BY id DESC LIMIT ?"
         args.append(int(n))
         return [r[0] for r in self.db.execute(q, args).fetchall()]

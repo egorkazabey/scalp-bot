@@ -898,6 +898,10 @@ class Engine:
 
     def auto_paused(self, typ, sym):
         ap = self.s["auto_paused"]
+        # пауза по монете считается по скальпингу и на длинные сделки не действует:
+        # у них другие стопы и сроки, неудачный скальпинг по монете ничего о них не говорит
+        if typ in self.SWING_TYPES:
+            return ap.get(f"type:{typ}")
         return ap.get(f"type:{typ}") or ap.get(f"coin:{sym}")
 
     @staticmethod
@@ -916,8 +920,11 @@ class Engine:
         checks = (
             (f"type:{typ}", TYPE_NAMES.get(typ, typ), self.s.get("pause_window"),
              dict(typ=typ), -0.05, 0.8),
-            (f"coin:{sym}", sym.replace("USDT", ""), self.s.get("pause_coin_window"), dict(symbol=sym), -0.15, 0.7),
+            (f"coin:{sym}", sym.replace("USDT", ""), self.s.get("pause_coin_window"),
+             dict(symbol=sym, not_types=self.SWING_TYPES), -0.15, 0.7),
         )
+        if typ in self.SWING_TYPES:
+            checks = checks[:1]
         for key, name, win, flt, bad_avg, bad_pf in checks:
             if key not in ap:
                 since = self.s["pause_reset"].get(key, 0)
@@ -926,18 +933,22 @@ class Engine:
                     why = f"последние {n} сигналов: в среднем {avg:+.2f}% на сделку, профит-фактор {pf:.2f}"
                     ap[key] = {"since": time.time(), "why": why}
                     changed = True
+                    coin = key.startswith("coin:")
                     self.say(f"🧠 <b>Автопауза: {name}</b>\n"
-                             f"Последние {n} сигналов в минусе: в среднем {avg:+.2f}% на сделку, "
-                             f"профит-фактор {pf:.2f}.\n\n"
-                             "Сделок и уведомлений по ним не будет. Сигналы продолжаю проверять "
-                             "виртуально и верну сам, когда станет плюс. Вернуть сейчас: /unpause")
+                             f"Последние {n} {'скальперских ' if coin else ''}сигналов в минусе: "
+                             f"в среднем {avg:+.2f}% на сделку, профит-фактор {pf:.2f}.\n\n"
+                             f"Новых {'скальперских ' if coin else ''}сделок и уведомлений не будет"
+                             f"{' (тренд и фандинг по монете работают, открытые сделки ведутся дальше)' if coin else ''}. "
+                             "Сигналы продолжаю проверять виртуально и верну сам, когда станет плюс. "
+                             "Вернуть сейчас: /unpause")
             else:
                 # возвращаем, когда свежая половина окна (собранная уже во время паузы) в плюсе
                 half = max(5, win // 2)
                 since = ap[key]["since"]
                 col = self.exit_col()
                 rs = [(r[col] if r[col] is not None else r["r_pct"]) for r in self.db.results(since=since)
-                      if (flt.get("typ") in (None, r["type"])) and (flt.get("symbol") in (None, r["symbol"]))]
+                      if (flt.get("typ") in (None, r["type"])) and (flt.get("symbol") in (None, r["symbol"]))
+                      and r["type"] not in flt.get("not_types", ())]
                 n, avg, pf = self._perf(rs[-half:])
                 if n >= half and avg > 0.02 and pf > 1.1:
                     del ap[key]
