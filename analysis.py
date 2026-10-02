@@ -154,6 +154,25 @@ def analyze(rows, min_n=15, title="всё время", exit_col="r_pct"):
             st = stats([r["_orig"][c] for r in live_both])
             mark = "  ← сейчас" if c == exit_col else ""
             head.append(f"{name}: {st['mean']:+.3f}% · в плюс {st['win']:.0f}%{mark}")
+    # если бы входили в обратную сторону: та же точка, стоп и тейк меняются местами
+    rev_rows = [r for r in all_rows if r.get("r_rev") is not None and r["_orig"]["r_pct"] is not None]
+    if len(rev_rows) >= min_n:
+        head.append(f"\n🔄 <b>Если входить наоборот</b> ({len(rev_rows)} сигналов)")
+        head.append("<i>Та же цена входа в другую сторону: наш стоп становится тейком, наш тейк стопом. "
+                    "С комиссиями.</i>")
+        by = {}
+        for r in rev_rows:
+            by.setdefault(SHORT_NAMES.get(r["type"], r["type"]), []).append(r)
+        lines = []
+        for name, rs in [("все", rev_rows)] + sorted(by.items(), key=lambda kv: -len(kv[1])):
+            if len(rs) < min_n and name != "все":
+                continue
+            a = stats([r["_orig"]["r_pct"] for r in rs])
+            b = stats([r["r_rev"] for r in rs])
+            mark = " ✅" if b["mean"] > 0 and b["mean"] - 2 * b["se"] > 0 else ""
+            lines.append(html.escape(f"{name[:12]:<12} {b['n']:>4} {a['mean']:>+7.3f}% {b['mean']:>+7.3f}% "
+                                     f"{b['win']:>3.0f}%") + mark)
+        head.append(f"<pre>{'':<12} {'N':>4} {'как есть':>8} {'наоборот':>8} плюс\n" + "\n".join(lines) + "</pre>")
     findings = []
     sections = []
     for gname, key in GROUPS:

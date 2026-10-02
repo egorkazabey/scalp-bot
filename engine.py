@@ -851,17 +851,28 @@ class Engine:
                 elif use_near and st.get("be_sl") is None and near_stop_step(st, v["price"], v["sl"], price,
                                                                               zone, reset):
                     res[leg] = ("near", price)
-            if all(leg in res for leg in self.EXITS):
+            # обратная сделка: та же точка входа, но в другую сторону. Её тейк это наш стоп,
+            # её стоп это наш тейк. Только для статистики, по-настоящему не открывается
+            if "rev" not in res:
+                if (long and price >= v["tp"]) or (not long and price <= v["tp"]):
+                    res["rev"] = ("sl", v["tp"])
+                elif (long and price < v["sl"] * (1 - through)) or (not long and price > v["sl"] * (1 + through)):
+                    res["rev"] = ("tp", v["sl"])
+            if all(leg in res for leg in self.EXITS) and "rev" in res:
                 self._finish_virtual(v)
 
     def _finish_virtual(self, v, price=None):
         res = v.setdefault("res", {})
-        for leg in self.EXITS:
+        for leg in list(self.EXITS) + ["rev"]:
             if leg not in res and price:
                 res[leg] = ("time", price)
         self.virtual.get(v["symbol"], {}).pop(v["id"], None)
         r = {leg: self._virtual_r(v, res[leg][1], res[leg][0]) for leg in self.EXITS}
-        self.db.set_signal_result(v["id"], res["base"][0], r["base"], r["be"], r["near"], r["both"])
+        rev = None
+        if "rev" in res:
+            flipped = dict(v, side="SHORT" if v["side"] == "LONG" else "LONG", maker=False)
+            rev = self._virtual_r(flipped, res["rev"][1], res["rev"][0])
+        self.db.set_signal_result(v["id"], res["base"][0], r["base"], r["be"], r["near"], r["both"], rev)
         if self.s.get("auto_pause"):
             self._update_pauses(v["type"], v["symbol"])
 
